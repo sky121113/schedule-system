@@ -1,0 +1,5 @@
+# 不上傳 Go build 的檔案
+/bin/
+/*.exe
+*.log
+.env
