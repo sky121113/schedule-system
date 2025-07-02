@@ -3,5 +3,5 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println("Hello, Schedule System!")
+	fmt.Println("Hello, Schedule System!mama")
 }
