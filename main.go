@@ -2,10 +2,8 @@ package main
 
 import (
 	"schedule-system/config"
-	"schedule-system/controllers"
 	"schedule-system/models"
-
-	"github.com/gin-gonic/gin"
+	"schedule-system/routes"
 )
 
 func main() {
@@ -15,11 +13,9 @@ func main() {
 	// 自動建立資料表
 	config.DB.AutoMigrate(&models.User{})
 
-	r := gin.Default()
+	// 設定路由
+	router := routes.SetupRouter()
 
-	// User API 路由
-	r.POST("/users", controllers.CreateUser)    // 新增 User
-	r.PUT("/users/:id", controllers.UpdateUser) // 更新 User
-
-	r.Run(":8080") // 啟動伺服器
+	// 啟動伺服器
+	router.Run(":8080")
 }

@@ -29,3 +29,5 @@
 │   └── user.go                # User 模型
 ├── controllers/
 │   └── user_controller.go     # User API 控制器
+├── routes/
+│   └── router.go              #  所有 API 路由集中管理
