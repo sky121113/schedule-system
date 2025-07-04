@@ -25,6 +25,9 @@
 ├── README.md       # 專案說明
 ├── config/
 │   └── db.go                  # MySQL 資料庫連線
+├── db/
+│   └── connection.go          # MySQL 資料庫連線
+│   └── migrate.go             # 跑資料表建置
 ├── models/
 │   └── user.go                # User 模型
 ├── controllers/

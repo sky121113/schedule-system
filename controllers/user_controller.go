@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"schedule-system/config"
+	"schedule-system/db"
 	"schedule-system/models"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +23,7 @@ func CreateUser(c *gin.Context) {
 		user.Status = 1
 	}
 
-	if result := config.DB.Create(&user); result.Error != nil {
+	if result := db.DB.Create(&user); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
 		return
 	}
@@ -34,21 +34,23 @@ func CreateUser(c *gin.Context) {
 // 更新 User
 func UpdateUser(c *gin.Context) {
 	id := c.Param("id")
-	var user models.User
 
-	// 查找 User
-	if err := config.DB.First(&user, id).Error; err != nil {
+	// 先找出原始資料
+	var user models.User
+	if err := db.DB.First(&user, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User 不存在"})
 		return
 	}
 
-	// 更新資料
-	if err := c.ShouldBindJSON(&user); err != nil {
+	// 用 map 接收 JSON，避免覆蓋整個 struct
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if result := config.DB.Save(&user); result.Error != nil {
+	// 更新資料
+	if result := db.DB.Model(&user).Updates(input); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
 		return
 	}
@@ -61,7 +63,7 @@ func GetUser(c *gin.Context) {
 	id := c.Param("id")
 	var user models.User
 
-	if err := config.DB.First(&user, id).Error; err != nil {
+	if err := db.DB.First(&user, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User 不存在"})
 		return
 	}
@@ -78,23 +80,39 @@ func GetUsers(c *gin.Context) {
 	if statusQuery != "" {
 		status, err := strconv.Atoi(statusQuery)
 		if err == nil {
-			config.DB.Where("status = ?", status).Find(&users)
+			db.DB.Where("status = ?", status).Find(&users)
 		} else {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "status 必須是數字"})
 			return
 		}
 	} else {
-		config.DB.Find(&users)
+		db.DB.Find(&users)
 	}
 
 	c.JSON(http.StatusOK, users)
 }
 
 // 刪除 User
+// ✅ 刪除 User (僅允許 status=0)
 func DeleteUser(c *gin.Context) {
 	id := c.Param("id")
-	if result := config.DB.Delete(&models.User{}, id); result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
+	var user models.User
+
+	// 先查找 User
+	if err := db.DB.First(&user, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User 不存在"})
+		return
+	}
+
+	// 檢查狀態
+	if user.Status != 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "僅允許刪除狀態為停用 (status=0) 的 User"})
+		return
+	}
+
+	// 執行刪除
+	if result := db.DB.Delete(&user).Error; result != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error()})
 		return
 	}
 

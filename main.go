@@ -1,17 +1,16 @@
 package main
 
 import (
-	"schedule-system/config"
-	"schedule-system/models"
+	"schedule-system/db"
 	"schedule-system/routes"
 )
 
 func main() {
 	// 連接資料庫
-	config.ConnectDB()
+	db.ConnectDB()
 
 	// 自動建立資料表
-	config.DB.AutoMigrate(&models.User{})
+	db.RunMigrations()
 
 	// 設定路由
 	router := routes.SetupRouter()
