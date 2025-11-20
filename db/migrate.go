@@ -10,8 +10,8 @@ import (
 func RunMigrations() {
 	err := DB.AutoMigrate(
 		&models.User{},
-		&models.Shift{},
-		// &models.Schedule{},
+		&models.ShiftRequirement{},
+		&models.UserSchedule{},
 	)
 	if err != nil {
 		log.Fatal("資料庫建表失敗:", err)
