@@ -289,8 +289,17 @@ func GenerateMonthlySchedule(c *gin.Context) {
 		}
 	}
 
-	// 執行排班 (傳入預假資料)
-	slots, warnings := runMonthlySchedule(firstDay, totalDaysInMonth, employees, constraints, reqMap, boundaries, quotas, monthlyPreLeaves, templatePreLeaves)
+	// 抓取前一天的班別 (處理跨月邊界)
+	prevDay := firstDay.AddDate(0, 0, -1)
+	var prevDaySlots []models.MonthlySlot
+	db.DB.Where("date = ?", prevDay).Find(&prevDaySlots)
+	prevDaySchedule := make(map[uint]string)
+	for _, ps := range prevDaySlots {
+		prevDaySchedule[ps.EmployeeID] = ps.ShiftType
+	}
+
+	// 執行排班 (傳入預假與前日資料)
+	slots, warnings := runMonthlySchedule(firstDay, totalDaysInMonth, employees, constraints, reqMap, boundaries, quotas, monthlyPreLeaves, templatePreLeaves, prevDaySchedule)
 
 	// 儲存到資料庫
 	err := db.DB.Transaction(func(tx *gorm.DB) error {
@@ -337,12 +346,16 @@ func GenerateMonthlySchedule(c *gin.Context) {
 		return
 	}
 
+	// 取得假期摘要
+	summaries := generateLeaveSummaries(year, month)
+
 	c.JSON(http.StatusOK, gin.H{
 		"message":    fmt.Sprintf("%d/%d 月度班表產出成功", year, month),
 		"slots":      slots,
 		"warnings":   warnings,
 		"boundaries": boundaries,
 		"quotas":     quotas,
+		"summaries":  summaries,
 	})
 }
 
@@ -388,6 +401,7 @@ func runMonthlySchedule(
 	quotas []cycleQuota,
 	monthlyPreLeaves []models.MonthlyPreScheduledLeave,
 	templatePreLeaves []models.PreScheduledLeave,
+	prevDaySchedule map[uint]string,
 ) ([]models.MonthlySlot, []string) {
 
 	log.Printf("[Monthly] runMonthlySchedule 開始: %d 天, %d 名員工, 預假數: %d", totalDays, len(employees), len(monthlyPreLeaves))
@@ -597,11 +611,17 @@ func runMonthlySchedule(
 
 	// ─── 步驟 3：排大夜連續班段（直接復用 v6 fillConsecutiveV3）───
 	log.Printf("[Monthly] 步驟 3: 排大夜, 需要人數: %d", nightEmpsNeeded)
-	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "night", totalDays, 4, 2, nightEmpsNeeded)
+	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "night", totalDays, 4, 2, nightEmpsNeeded, prevDaySchedule)
 
 	// ─── 步驟 4：排小夜連續班段（直接復用 v6 fillConsecutiveV3）───
 	log.Printf("[Monthly] 步驟 4: 排小夜, 需要人數: %d", eveningEmpsNeeded)
-	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "evening", totalDays, 4, 1, eveningEmpsNeeded)
+	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "evening", totalDays, 4, 1, eveningEmpsNeeded, prevDaySchedule)
+
+	// DEBUG: 檢查特定日期之後的狀態
+	for _, id := range []uint{9, 4} { // I=9, D=4
+		log.Printf("[DEBUG-AFTER-STEP4] Emp %d: d=4(Apr5)=%s, d=5(Apr6)=%s, d=8(Apr9)=%s, d=9(Apr10)=%s", 
+			id, schedule[4][id], schedule[5][id], schedule[8][id], schedule[9][id])
+	}
 
 	// ─── 步驟 5：C7 強制 off 掃描 ⭐ ───
 	log.Println("[Monthly] 步驟 5: C7 強制 off 掃描")
@@ -668,8 +688,11 @@ func runMonthlySchedule(
 			}
 
 			for n := current; n < minNeeded; n++ {
-				bestID := findBestCandidateV3(employees, schedule, shiftCount, constraints, d, st, totalDays, emptyPreLeaves)
+				bestID := findBestCandidateV3(employees, schedule, shiftCount, constraints, d, st, totalDays, emptyPreLeaves, prevDaySchedule)
 				if bestID != 0 {
+					if (d == 5 || d == 9) && st == "day" {
+						log.Printf("[DEBUG-STEP6-ASSIGN] Day %d: %s -> %d (Prev: %s)", d, st, bestID, schedule[d-1][bestID])
+					}
 					schedule[d][bestID] = st
 					shiftCount[bestID][st]++
 				}
@@ -682,8 +705,11 @@ func runMonthlySchedule(
 	for d := 0; d < totalDays; d++ {
 		for _, emp := range employees {
 			if schedule[d][emp.ID] == "" {
-				// 使用 canAssignV6 檢查是否可以排白班
-				if canAssignV6(emp.ID, schedule, shiftCount, constraints, d, "day", totalDays) {
+				can := canAssignV6(emp.ID, schedule, shiftCount, constraints, d, "day", totalDays, prevDaySchedule)
+				if (d == 5 || d == 9) && (emp.ID == 9 || emp.ID == 4) {
+					log.Printf("[DEBUG-STEP7-CHECK] Day %d: Emp %d, canAssign=%v, Prev=%s", d, emp.ID, can, schedule[d-1][emp.ID])
+				}
+				if can {
 					schedule[d][emp.ID] = "day"
 					shiftCount[emp.ID]["day"]++
 				} else {
@@ -696,10 +722,68 @@ func runMonthlySchedule(
 	}
 
 	// ─── 步驟 8：人力不足檢查 (Warnings) ───
+	warnings := calculateWarnings(firstDay, totalDays, employees, reqMap, schedule, prevDaySchedule)
+
+	// ─── 轉換為 MonthlySlot ───
+	var result []models.MonthlySlot
+	for d := 0; d < totalDays; d++ {
+		date := firstDay.AddDate(0, 0, d)
+		daysSinceStart := int(date.Sub(cycleStartDate).Hours() / 24)
+		cycIdx := daysSinceStart/28 + 1
+		dOffset := daysSinceStart % 28
+		if dOffset < 0 {
+			dOffset += 28
+			cycIdx--
+		}
+
+		for _, emp := range employees {
+			shiftType := schedule[d][emp.ID]
+			if d == 19 && (emp.ID == 1 || emp.ID == 2) {
+				log.Printf("[TRANSFORM] Day 19 (3/20), EmpID %d: 原班別=%s", emp.ID, shiftType)
+			}
+			if shiftType == "" {
+				shiftType = "day"
+			}
+			if shiftType == "pre_off" {
+				shiftType = "off"
+			}
+			result = append(result, models.MonthlySlot{
+				Date:       date,
+				ShiftType:  shiftType,
+				EmployeeID: emp.ID,
+				CycleIndex: cycIdx,
+				DayOffset:  dOffset,
+			})
+		}
+	}
+
+	log.Printf("[Monthly] runMonthlySchedule 完成: 產出 %d 個 slots, 警告數: %d", len(result), len(warnings))
+	return result, warnings
+}
+
+// calculateWarnings 獨立出人力不足的檢查邏輯
+func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Employee, reqMap map[requirementKey]models.StaffingRequirement, schedule map[int]map[uint]string, prevDaySchedule map[uint]string) []string {
 	var warnings []string
 	for d := 0; d < totalDays; d++ {
 		date := firstDay.AddDate(0, 0, d)
 		weekday := int(date.Weekday())
+
+		// --- 額外：檢查夜班接白班之限制 (C1, C2) ---
+		for _, emp := range employees {
+			shift := schedule[d][emp.ID]
+			if shift == "day" || shift == "day88" {
+				prev := ""
+				if d > 0 {
+					prev = schedule[d-1][emp.ID]
+				} else if d == 0 && prevDaySchedule != nil {
+					prev = prevDaySchedule[emp.ID]
+				}
+				if isNightShift(prev) {
+					warnings = append(warnings, fmt.Sprintf("%d/%02d/%02d 違反排班約束: %s 班接續前日夜班 (%s)",
+						date.Year(), date.Month(), date.Day(), shift, emp.Name))
+				}
+			}
+		}
 
 		// 檢查每個班別的需求
 		for _, st := range []string{"day", "evening", "night"} {
@@ -751,42 +835,7 @@ func runMonthlySchedule(
 			warnings = append(warnings, warn)
 		}
 	}
-
-	// ─── 轉換為 MonthlySlot ───
-	var result []models.MonthlySlot
-	for d := 0; d < totalDays; d++ {
-		date := firstDay.AddDate(0, 0, d)
-		daysSinceStart := int(date.Sub(cycleStartDate).Hours() / 24)
-		cycIdx := daysSinceStart/28 + 1
-		dOffset := daysSinceStart % 28
-		if dOffset < 0 {
-			dOffset += 28
-			cycIdx--
-		}
-
-		for _, emp := range employees {
-			shiftType := schedule[d][emp.ID]
-			if d == 19 && (emp.ID == 1 || emp.ID == 2) {
-				log.Printf("[TRANSFORM] Day 19 (3/20), EmpID %d: 原班別=%s", emp.ID, shiftType)
-			}
-			if shiftType == "" {
-				shiftType = "day"
-			}
-			if shiftType == "pre_off" {
-				shiftType = "off"
-			}
-			result = append(result, models.MonthlySlot{
-				Date:       date,
-				ShiftType:  shiftType,
-				EmployeeID: emp.ID,
-				CycleIndex: cycIdx,
-				DayOffset:  dOffset,
-			})
-		}
-	}
-
-	log.Printf("[Monthly] runMonthlySchedule 完成: 產出 %d 個 slots, 警告數: %d", len(result), len(warnings))
-	return result, warnings
+	return warnings
 }
 
 // GetMonthlyLeaveSummary 獲取月度假期摘要
@@ -798,25 +847,31 @@ func GetMonthlyLeaveSummary(c *gin.Context) {
 	lastDay := firstDay.AddDate(0, 1, -1)
 	boundaries := calcCycleBoundaries(firstDay, lastDay)
 
+	summaries := generateLeaveSummaries(year, month)
+
+	c.JSON(http.StatusOK, gin.H{
+		"year":       year,
+		"month":      month,
+		"boundaries": boundaries,
+		"summaries":  summaries,
+	})
+}
+
+// generateLeaveSummaries 將假期計算核心獨立出
+func generateLeaveSummaries(year int, month int) []gin.H {
+	firstDay := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	lastDay := firstDay.AddDate(0, 1, -1)
+	boundaries := calcCycleBoundaries(firstDay, lastDay)
+
 	var employees []models.Employee
 	db.DB.Where("status = 1").Find(&employees)
 
-	type EmpLeaveSummary struct {
-		EmployeeID        uint   `json:"employee_id"`
-		EmployeeName      string `json:"employee_name"`
-		CycleIndex        int    `json:"cycle_index"`
-		TotalLeave        int    `json:"total_leave"`
-		UsedLeave         int    `json:"used_leave"`
-		Remaining         int    `json:"remaining"`
-		CurrentMonthQuota int    `json:"current_month_quota"` // 本月應休目標
-	}
-
-	var summaries []EmpLeaveSummary
+	var summaries []gin.H
 	for _, b := range boundaries {
 		for _, emp := range employees {
 			var balance models.CycleLeaveBalance
 			if err := db.DB.Where("cycle_index = ? AND employee_id = ?", b.CycleIndex, emp.ID).First(&balance).Error; err != nil {
-				// 若尚未有 balance 紀錄，不應跳過，賦予預設的循環總假供前端顯示
+				// 若尚未有 balance 紀錄，賦予預設的循環總假供前端顯示
 				defaultTotal := taiwanHolidays2026[b.CycleIndex]
 				if defaultTotal == 0 {
 					var reqs []models.StaffingRequirement
@@ -833,19 +888,15 @@ func GetMonthlyLeaveSummary(c *gin.Context) {
 			}
 
 			isEndingThisMonth := !cycleStartDate.AddDate(0, 0, (b.CycleIndex*28)-1).After(lastDay)
-			// 直接使用 MonthQuota（使用者手動設定）或按比例計算
 			var currentMonthQuota int
 			if balance.MonthQuota >= 0 {
-				// 有手動指定（例如 C1）
 				currentMonthQuota = balance.MonthQuota
 			} else if isEndingThisMonth {
-				// 本月結束的循環，但沒設定 MonthQuota → 用剩餘
 				currentMonthQuota = balance.TotalLeave - balance.UsedLeave
 				if currentMonthQuota < 0 {
 					currentMonthQuota = 0
 				}
 			} else {
-				// 按比例：直接用 TotalLeave * ratio，每個循環的假期是獨立的
 				ratio := float64(b.DaysInMonth) / 28.0
 				currentMonthQuota = int(math.Round(float64(balance.TotalLeave) * ratio))
 				if currentMonthQuota > b.DaysInMonth {
@@ -853,24 +904,27 @@ func GetMonthlyLeaveSummary(c *gin.Context) {
 				}
 			}
 
-			summaries = append(summaries, EmpLeaveSummary{
-				EmployeeID:        emp.ID,
-				EmployeeName:      emp.Name,
-				CycleIndex:        b.CycleIndex,
-				TotalLeave:        balance.TotalLeave,
-				UsedLeave:         balance.UsedLeave,
-				Remaining:         balance.TotalLeave - balance.UsedLeave,
-				CurrentMonthQuota: currentMonthQuota,
+			// 動態計算「循環累計已用」(只計算該循環中，查詢月份「之前」的排休天數)
+			var usedBeforeThisMonth int64
+			db.DB.Model(&models.MonthlySlot{}).
+				Where("cycle_index = ? AND employee_id = ? AND shift_type = 'off' AND date < ?", b.CycleIndex, emp.ID, firstDay).
+				Count(&usedBeforeThisMonth)
+			
+			// 加上外部額外紀錄的已用天數 (若有)
+			actualUsedLeave := int(usedBeforeThisMonth) + balance.OfflineUsed
+
+			summaries = append(summaries, gin.H{
+				"employee_id":         emp.ID,
+				"employee_name":       emp.Name,
+				"cycle_index":         b.CycleIndex,
+				"total_leave":         balance.TotalLeave,
+				"used_leave":          actualUsedLeave,
+				"remaining":           balance.TotalLeave - actualUsedLeave,
+				"current_month_quota": currentMonthQuota,
 			})
 		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"year":       year,
-		"month":      month,
-		"boundaries": boundaries,
-		"summaries":  summaries,
-	})
+	return summaries
 }
 
 // UpdateCycleBalance 手動調整循環假期（逐人）
@@ -930,9 +984,75 @@ func UpdateMonthlySlot(c *gin.Context) {
 	slot.ShiftType = input.ShiftType
 	db.DB.Save(&slot)
 
+	// --- 重新計算該月份人力的 Warnings 與 假期 Summaries ---
+	// 取出該月份所有的 slots，建構 schedule 矩陣
+	var monthSchedule models.MonthlySchedule
+	if err := db.DB.First(&monthSchedule, slot.ScheduleID).Error; err == nil {
+		year := monthSchedule.Year
+		month := monthSchedule.Month
+		firstDay := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.FixedZone("CST", 8*3600))
+		lastDay := firstDay.AddDate(0, 1, -1)
+		totalDays := lastDay.Day()
+
+		var allSlots []models.MonthlySlot
+		db.DB.Where("schedule_id = ?", monthSchedule.ID).Find(&allSlots)
+
+		var employees []models.Employee
+		db.DB.Where("status = 1").Find(&employees)
+
+		var requirements []models.StaffingRequirement
+		db.DB.Find(&requirements)
+		reqMap := buildRequirementMap(requirements)
+
+		// 使用更穩定的索引方式 (考慮時區)
+		loc := time.FixedZone("CST", 8*3600)
+		scheduleMap := make(map[int]map[uint]string)
+		for d := 0; d < totalDays; d++ {
+			scheduleMap[d] = make(map[uint]string)
+		}
+		for _, s := range allSlots {
+			// 計算該日期相對於月初的天數偏移
+			dIdx := int(s.Date.In(loc).Sub(firstDay).Hours() / 24)
+			if dIdx >= 0 && dIdx < totalDays {
+				scheduleMap[dIdx][s.EmployeeID] = s.ShiftType
+			}
+		}
+
+		// 抓取前一天的班別 (處理跨月邊界)
+		prevDay := firstDay.AddDate(0, 0, -1)
+		var prevDaySlots []models.MonthlySlot
+		db.DB.Where("date = ?", prevDay).Find(&prevDaySlots)
+		prevDaySchedule := make(map[uint]string)
+		for _, ps := range prevDaySlots {
+			prevDaySchedule[ps.EmployeeID] = ps.ShiftType
+		}
+
+		warnings := calculateWarnings(firstDay, totalDays, employees, reqMap, scheduleMap, prevDaySchedule)
+		if warnings == nil {
+			warnings = []string{}
+		}
+		summaries := generateLeaveSummaries(year, month)
+		if summaries == nil {
+			summaries = []gin.H{}
+		}
+		boundaries := calcCycleBoundaries(firstDay, lastDay)
+
+		log.Printf("[UpdateSlot] ID:%s, Date:%s, NewShift:%s, Warnings:%d", slotID, slot.Date.Format("2006-01-02"), input.ShiftType, len(warnings))
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "排班已更新: " + oldShift + " → " + input.ShiftType,
+			"slot":       slot,
+			"warnings":   warnings,
+			"summaries":  summaries,
+			"boundaries": boundaries,
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("排班已更新: %s → %s", oldShift, input.ShiftType),
-		"slot":    slot,
+		"message":  "排班已更新: " + oldShift + " → " + input.ShiftType,
+		"slot":     slot,
+		"warnings": []string{},
 	})
 }
 
@@ -984,11 +1104,15 @@ func CreateMonthlyPreLeave(c *gin.Context) {
 		return
 	}
 
-	// 檢查是否已存在
+	// 檢查是否已存在 (包含軟刪除的紀錄)
 	var existing models.MonthlyPreScheduledLeave
-	result := db.DB.Where("employee_id = ? AND date = ?", input.EmployeeID, parsedDate).First(&existing)
+	result := db.DB.Unscoped().Where("employee_id = ? AND date = ?", input.EmployeeID, parsedDate).First(&existing)
 	if result.Error == nil {
-		// 已存在，更新原因
+		// 若紀錄以前被標記為軟刪除，將其恢復 (revive)
+		if existing.DeletedAt.Valid {
+			existing.DeletedAt = gorm.DeletedAt{} // 清除刪除標記
+		}
+		// 更新原因
 		existing.Reason = input.Reason
 		db.DB.Save(&existing)
 		c.JSON(http.StatusOK, existing)
@@ -1011,9 +1135,211 @@ func CreateMonthlyPreLeave(c *gin.Context) {
 // DeleteMonthlyPreLeave 刪除月度預假
 func DeleteMonthlyPreLeave(c *gin.Context) {
 	id := c.Param("id")
-	if err := db.DB.Delete(&models.MonthlyPreScheduledLeave{}, id).Error; err != nil {
+	if err := db.DB.Unscoped().Delete(&models.MonthlyPreScheduledLeave{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "預假已刪除"})
 }
+
+// SaveMonthlyVersion 儲存當前班表為一個新版本
+func SaveMonthlyVersion(c *gin.Context) {
+	year, _ := strconv.Atoi(c.Param("year"))
+	month, _ := strconv.Atoi(c.Param("month"))
+
+	var input struct {
+		VersionName string `json:"version_name" binding:"required"`
+		Creator     string `json:"creator"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 1. 取得目前的月度班表
+	var schedule models.MonthlySchedule
+	if err := db.DB.Where("year = ? AND month = ?", year, month).First(&schedule).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "尚未建立該月班表，無法儲存版本"})
+		return
+	}
+
+	// 2. 取得目前所有的 slots
+	var slots []models.MonthlySlot
+	db.DB.Where("schedule_id = ?", schedule.ID).Find(&slots)
+
+	// 3. 開啟交易進行儲存
+	err := db.DB.Transaction(func(tx *gorm.DB) error {
+		// 建立版本主紀錄
+		version := models.MonthlyScheduleVersion{
+			Year:        year,
+			Month:       month,
+			VersionName: input.VersionName,
+			Creator:     input.Creator,
+		}
+		if err := tx.Create(&version).Error; err != nil {
+			return err
+		}
+
+		// 複製所有 slots 到版本紀錄中
+		for _, s := range slots {
+			vSlot := models.MonthlySlotVersion{
+				VersionID:  version.ID,
+				Date:       s.Date,
+				ShiftType:  s.ShiftType,
+				EmployeeID: s.EmployeeID,
+				CycleIndex: s.CycleIndex,
+				DayOffset:  s.DayOffset,
+			}
+			if err := tx.Create(&vSlot).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "儲存版本失敗: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "版本儲存成功", "version_name": input.VersionName})
+}
+
+// ListMonthlyVersions 列出指定月份的所有版本
+func ListMonthlyVersions(c *gin.Context) {
+	year, _ := strconv.Atoi(c.Param("year"))
+	month, _ := strconv.Atoi(c.Param("month"))
+
+	var versions []models.MonthlyScheduleVersion
+	db.DB.Where("year = ? AND month = ?", year, month).Order("created_at DESC").Find(&versions)
+
+	c.JSON(http.StatusOK, versions)
+}
+
+// RestoreMonthlyVersion 恢復指定版本到主班表
+func RestoreMonthlyVersion(c *gin.Context) {
+	versionID := c.Param("versionId")
+
+	var version models.MonthlyScheduleVersion
+	if err := db.DB.First(&version, versionID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "找不到該版本"})
+		return
+	}
+
+	// 1. 取得對應的主排班紀錄 (若不存在則建立)
+	var schedule models.MonthlySchedule
+	db.DB.Where("year = ? AND month = ?", version.Year, version.Month).FirstOrCreate(&schedule, models.MonthlySchedule{
+		Year:  version.Year,
+		Month: version.Month,
+	})
+
+	// 2. 取得版本中的所有 slots
+	var vSlots []models.MonthlySlotVersion
+	db.DB.Where("version_id = ?", version.ID).Find(&vSlots)
+
+	// 3. 執行覆蓋
+	err := db.DB.Transaction(func(tx *gorm.DB) error {
+		// 清除主班表舊的 slots
+		tx.Unscoped().Where("schedule_id = ?", schedule.ID).Delete(&models.MonthlySlot{})
+
+		// 寫入版本資料
+		for _, vs := range vSlots {
+			slot := models.MonthlySlot{
+				ScheduleID: schedule.ID,
+				Date:       vs.Date,
+				ShiftType:  vs.ShiftType,
+				EmployeeID: vs.EmployeeID,
+				CycleIndex: vs.CycleIndex,
+				DayOffset:  vs.DayOffset,
+			}
+			if err := tx.Create(&slot).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "恢復版本失敗: " + err.Error()})
+		return
+	}
+
+	// 恢復完畢後，回傳最新的狀態 (Warnings 與 Summaries)
+	firstDay := time.Date(version.Year, time.Month(version.Month), 1, 0, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	lastDay := firstDay.AddDate(0, 1, -1)
+	totalDays := lastDay.Day()
+
+	var employees []models.Employee
+	db.DB.Where("status = 1").Find(&employees)
+
+	var requirements []models.StaffingRequirement
+	db.DB.Find(&requirements)
+	reqMap := buildRequirementMap(requirements)
+
+	var allSlots []models.MonthlySlot
+	db.DB.Where("schedule_id = ?", schedule.ID).Find(&allSlots)
+
+	loc := time.FixedZone("CST", 8*3600)
+	scheduleMap := make(map[int]map[uint]string)
+	for d := 0; d < totalDays; d++ {
+		scheduleMap[d] = make(map[uint]string)
+	}
+	for _, s := range allSlots {
+		dIdx := int(s.Date.In(loc).Sub(firstDay).Hours() / 24)
+		if dIdx >= 0 && dIdx < totalDays {
+			scheduleMap[dIdx][s.EmployeeID] = s.ShiftType
+		}
+	}
+
+	// 抓取前一天的班別 (處理跨月邊界)
+	prevDay := firstDay.AddDate(0, 0, -1)
+	var prevDaySlots []models.MonthlySlot
+	db.DB.Where("date = ?", prevDay).Find(&prevDaySlots)
+	prevDaySchedule := make(map[uint]string)
+	for _, ps := range prevDaySlots {
+		prevDaySchedule[ps.EmployeeID] = ps.ShiftType
+	}
+
+	warnings := calculateWarnings(firstDay, totalDays, employees, reqMap, scheduleMap, prevDaySchedule)
+	if warnings == nil {
+		warnings = []string{}
+	}
+	summaries := generateLeaveSummaries(version.Year, version.Month)
+	if summaries == nil {
+		summaries = []gin.H{}
+	}
+	boundaries := calcCycleBoundaries(firstDay, lastDay)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "已恢復至版本: " + version.VersionName,
+		"slots":      allSlots,
+		"warnings":   warnings,
+		"summaries":  summaries,
+		"boundaries": boundaries,
+	})
+}
+
+// DeleteMonthlyVersion 刪除版本
+func DeleteMonthlyVersion(c *gin.Context) {
+	versionID := c.Param("versionId")
+
+	err := db.DB.Transaction(func(tx *gorm.DB) error {
+		// 刪除 slots
+		if err := tx.Unscoped().Where("version_id = ?", versionID).Delete(&models.MonthlySlotVersion{}).Error; err != nil {
+			return err
+		}
+		// 刪除版本主紀錄
+		if err := tx.Unscoped().Delete(&models.MonthlyScheduleVersion{}, versionID).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "刪除失敗: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "版本已徹底刪除"})
+}
+

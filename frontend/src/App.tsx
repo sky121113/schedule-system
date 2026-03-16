@@ -1,20 +1,18 @@
 import { useState } from 'react';
 import { ConfigProvider, Layout, Menu, theme } from 'antd';
-import { TeamOutlined, CalendarOutlined, SettingOutlined, ScheduleOutlined } from '@ant-design/icons';
+import { TeamOutlined, SettingOutlined, ScheduleOutlined } from '@ant-design/icons';
 import zhTW from 'antd/locale/zh_TW';
 import EmployeeManagement from './pages/EmployeeManagement';
 import StaffingSettings from './pages/StaffingSettings';
-import TemplateEditor from './pages/TemplateEditor';
 import MonthlySchedule from './pages/MonthlySchedule';
 
 const { Sider, Content, Header } = Layout;
 
 function App() {
-  const [current, setCurrent] = useState('template');
+  const [current, setCurrent] = useState('monthly');
 
   const menuItems = [
     { key: 'monthly', icon: <ScheduleOutlined />, label: '月度班表' },
-    { key: 'template', icon: <CalendarOutlined />, label: '排班模板' },
     { key: 'employees', icon: <TeamOutlined />, label: '員工管理' },
     { key: 'staffing', icon: <SettingOutlined />, label: '人力需求' },
   ];
@@ -27,9 +25,8 @@ function App() {
         return <EmployeeManagement />;
       case 'staffing':
         return <StaffingSettings />;
-      case 'template':
       default:
-        return <TemplateEditor />;
+        return <MonthlySchedule />;
     }
   };
 

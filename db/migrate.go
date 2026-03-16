@@ -18,6 +18,8 @@ func RunMigrations() {
 		&models.MonthlySlot{},
 		&models.CycleLeaveBalance{},
 		&models.MonthlyPreScheduledLeave{},
+		&models.MonthlyScheduleVersion{},
+		&models.MonthlySlotVersion{},
 	)
 	if err != nil {
 		log.Fatal("❌ 資料庫建表失敗:", err)

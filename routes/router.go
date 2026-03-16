@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"log"
 	"schedule-system/controllers"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,7 @@ func SetupRouter() *gin.Engine {
 
 	api := router.Group("/api/v1")
 	{
+		log.Println("🚀 路由設定中...")
 		// 員工管理
 		employees := api.Group("/employees")
 		{
@@ -86,12 +88,21 @@ func SetupRouter() *gin.Engine {
 		// 月度班表
 		monthly := api.Group("/monthly")
 		{
-			monthly.GET("/:year/:month", controllers.GetMonthlySchedule)
-			monthly.POST("/:year/:month/generate", controllers.GenerateMonthlySchedule)
+			// 班表版本管理 (放在較通用的路由之前)
+			monthly.GET("/:year/:month/versions", controllers.ListMonthlyVersions)
+			monthly.POST("/:year/:month/versions", controllers.SaveMonthlyVersion)
+			monthly.POST("/versions/:versionId/restore", controllers.RestoreMonthlyVersion)
+			monthly.DELETE("/versions/:versionId", controllers.DeleteMonthlyVersion)
+
+			// 統計與摘要
 			monthly.GET("/:year/:month/leave-summary", controllers.GetMonthlyLeaveSummary)
 			monthly.GET("/:year/:month/boundaries", controllers.GetCycleBoundaries)
 			monthly.PUT("/cycle-balance", controllers.UpdateCycleBalance)
 			monthly.PUT("/slots/:id", controllers.UpdateMonthlySlot)
+
+			// 核心操作
+			monthly.POST("/:year/:month/generate", controllers.GenerateMonthlySchedule)
+			monthly.GET("/:year/:month", controllers.GetMonthlySchedule)
 
 			// 月度預假
 			monthly.GET("/:year/:month/pre-leaves", controllers.GetMonthlyPreLeaves)

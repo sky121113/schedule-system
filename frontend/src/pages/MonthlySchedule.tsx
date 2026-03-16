@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Button, Card, Select, Space, Table, Tag, message, Modal,
   InputNumber, Form, Dropdown, Spin, Row, Col, Divider,
+  Drawer, List, Input, Popconfirm
 } from 'antd';
 import {
   LeftOutlined, RightOutlined, ThunderboltOutlined, EditOutlined,
@@ -11,9 +12,11 @@ import {
   getMonthlySchedule, generateMonthlySchedule, updateMonthlySlot,
   getMonthlyLeaveSummary, getCycleBoundaries, getEmployees,
   getMonthlyPreLeaves, createMonthlyPreLeave, deleteMonthlyPreLeave,
+  listMonthlyVersions, saveMonthlyVersion, restoreMonthlyVersion, deleteMonthlyVersion,
   type MonthlySlot, type CycleBoundary, type LeaveSummaryItem,
-  type MonthlyPreScheduledLeave,
+  type MonthlyPreScheduledLeave, type MonthlyScheduleVersion,
 } from '../services/api';
+import { HistoryOutlined, SaveOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { Employee } from '../types';
 import { SHIFT_CONFIG, type ShiftType } from '../types';
 
@@ -35,6 +38,12 @@ export default function MonthlySchedule() {
   // 初始假期設定彈窗
   const [initModalOpen, setInitModalOpen] = useState(false);
   const [initLeaveValues, setInitLeaveValues] = useState<Record<string, number>>({});
+
+  // 版本管理
+  const [versionModalOpen, setVersionModalOpen] = useState(false);
+  const [versionName, setVersionName] = useState('');
+  const [versions, setVersions] = useState<MonthlyScheduleVersion[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // 載入班表
   const loadSchedule = useCallback(async () => {
@@ -62,7 +71,7 @@ export default function MonthlySchedule() {
       try {
         const bRes = await getCycleBoundaries(year, month);
         setBoundaries(bRes.data.boundaries || []);
-        
+
         // 即使沒班表也要載入預假
         const preRes = await getMonthlyPreLeaves(year, month);
         setMonthlyPreLeaves(preRes.data || []);
@@ -90,16 +99,16 @@ export default function MonthlySchedule() {
     const defaults: Record<string, number> = {};
     for (const b of boundaries) {
       for (const emp of employees) {
-          const key = `${b.cycle_index}_${emp.ID}`;
-          const existing = leaveSummaries.find(s => s.employee_id === emp.ID && s.cycle_index === b.cycle_index);
-          
-          if (b.cycle_index === 1) {
-            // C1 強制預設顯示 3 天 (或從現有餘額抓取 current_month_quota)
-            defaults[key] = (existing && existing.current_month_quota > 0) ? existing.current_month_quota : 3;
-          } else {
-            // 其他循環預設顯示「總假期」
-            defaults[key] = (existing && existing.total_leave > 0) ? existing.total_leave : b.default_total_leave;
-          }
+        const key = `${b.cycle_index}_${emp.ID}`;
+        const existing = leaveSummaries.find(s => s.employee_id === emp.ID && s.cycle_index === b.cycle_index);
+
+        if (b.cycle_index === 1) {
+          // C1 強制預設顯示 3 天 (或從現有餘額抓取 current_month_quota)
+          defaults[key] = (existing && existing.current_month_quota > 0) ? existing.current_month_quota : 3;
+        } else {
+          // 其他循環預設顯示「總假期」
+          defaults[key] = (existing && existing.total_leave > 0) ? existing.total_leave : b.default_total_leave;
+        }
       }
     }
     setInitLeaveValues(defaults);
@@ -141,13 +150,85 @@ export default function MonthlySchedule() {
     await doGenerate(balances);
   };
 
+  // 載入版本清單
+  const loadVersions = useCallback(async () => {
+    try {
+      const res = await listMonthlyVersions(year, month);
+      setVersions(res.data);
+    } catch { /* ignore */ }
+  }, [year, month]);
+
+  useEffect(() => {
+    if (hasSchedule) loadVersions();
+  }, [hasSchedule, loadVersions]);
+
+  // 儲存版本
+  const handleSaveVersion = async () => {
+    if (!versionName.trim()) {
+      message.error('請輸入版本名稱');
+      return;
+    }
+    try {
+      await saveMonthlyVersion(year, month, { version_name: versionName, creator: '系統管理員' });
+      message.success('版本儲存成功');
+      setVersionModalOpen(false);
+      setVersionName('');
+      loadVersions();
+    } catch {
+      message.error('儲存版本失敗');
+    }
+  };
+
+  // 恢復版本
+  const handleRestoreVersion = async (vId: number) => {
+    setLoading(true);
+    try {
+      const res = await restoreMonthlyVersion(vId);
+      const { slots: newSlots, warnings: newWarnings, summaries: newSummaries, boundaries: newBoundaries } = res.data;
+      
+      if (newSlots) setSlots(newSlots);
+      if (newWarnings) setWarnings(newWarnings);
+      if (newSummaries) setLeaveSummaries(newSummaries);
+      if (newBoundaries) setBoundaries(newBoundaries);
+
+      message.success(res.data.message);
+      setHistoryOpen(false);
+    } catch {
+      message.error('恢復失敗');
+    }
+    setLoading(false);
+  };
+
+  // 刪除版本
+  const handleDeleteVersion = async (vId: number) => {
+    try {
+      await deleteMonthlyVersion(vId);
+      message.success('版本已刪除');
+      loadVersions();
+    } catch {
+      message.error('刪除失敗');
+    }
+  };
+
   // 手動修改格子
   const handleSlotChange = async (slotId: number, newShift: string) => {
     try {
-      await updateMonthlySlot(slotId, newShift);
+      const res = await updateMonthlySlot(slotId, newShift);
       setSlots((prev) =>
         prev.map((s) => (s.ID === slotId ? { ...s, shift_type: newShift } : s))
       );
+      
+      // 動態更新警告與假期計算結果
+      if (res.data.warnings) {
+        setWarnings(res.data.warnings);
+      }
+      if (res.data.summaries) {
+        setLeaveSummaries(res.data.summaries);
+      }
+      if (res.data.boundaries) {
+        setBoundaries(res.data.boundaries);
+      }
+
       message.success('已更新');
     } catch {
       message.error('更新失敗');
@@ -198,7 +279,7 @@ export default function MonthlySchedule() {
   // 用來取得某天某員工的 slot
   const getSlot = (empId: number, day: number): MonthlySlot | undefined => {
     const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    return slots.find((s) => s.employee_id === empId && s.date.startsWith(dateStr));
+    return (slots || []).find((s) => s.employee_id === empId && s.date.startsWith(dateStr));
   };
 
   // 班別下拉選單
@@ -278,7 +359,7 @@ export default function MonthlySchedule() {
                 }}
                 trigger={['click']}
               >
-                <div style={{ 
+                <div style={{
                   cursor: 'pointer', height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
                   background: preLeave ? '#f6ffed' : '#f0f0f0',
                   border: preLeave ? '1px dashed #52c41a' : 'none',
@@ -345,10 +426,10 @@ export default function MonthlySchedule() {
     }));
 
   // 假期統計
-  const cycleLeaveStats = boundaries.map((b) => {
-    const cycleLeave = leaveSummaries.filter((ls) => ls.cycle_index === b.cycle_index);
-    const totalUsed = cycleLeave.reduce((sum, ls) => sum + ls.used_leave, 0);
-    const totalRemaining = cycleLeave.reduce((sum, ls) => sum + ls.remaining, 0);
+  const cycleLeaveStats = (boundaries || []).map((b) => {
+    const cycleLeave = (leaveSummaries || []).filter((ls) => ls && ls.cycle_index === b.cycle_index);
+    const totalUsed = cycleLeave.reduce((sum, ls) => sum + (ls.used_leave || 0), 0);
+    const totalRemaining = cycleLeave.reduce((sum, ls) => sum + (ls.remaining || 0), 0);
     return { ...b, totalUsed, totalRemaining, details: cycleLeave };
   });
 
@@ -372,6 +453,22 @@ export default function MonthlySchedule() {
         >
           {hasSchedule ? '確認配額並重新產出' : '設定配額並產出班表'}
         </Button>
+        {hasSchedule && (
+          <Space>
+            <Button 
+              icon={<SaveOutlined />} 
+              onClick={() => setVersionModalOpen(true)}
+            >
+              儲存版本
+            </Button>
+            <Button 
+              icon={<HistoryOutlined />} 
+              onClick={() => setHistoryOpen(true)}
+            >
+              版本紀錄 ({versions.length})
+            </Button>
+          </Space>
+        )}
       </Space>
 
       {/* 循環分界資訊 */}
@@ -393,14 +490,14 @@ export default function MonthlySchedule() {
       )}
 
       {/* 警示訊息區 */}
-      {warnings.length > 0 && (
-        <Card 
-          size="small" 
-          title={<Space><span style={{ color: '#faad14' }}>⚠️ 班表人力警示 (共 {warnings.length} 處)</span></Space>}
+      {(warnings || []).length > 0 && (
+        <Card
+          size="small"
+          title={<Space><span style={{ color: '#faad14' }}>⚠️ 班表人力警示 (共 {(warnings || []).length} 處)</span></Space>}
           style={{ marginBottom: 24, border: '1px solid #ffe58f', background: '#fffbe6' }}
         >
           <ul style={{ margin: 0, paddingLeft: 20, color: '#856404', fontSize: 13 }}>
-            {warnings.map((w, i) => <li key={i}>{w}</li>)}
+            {(warnings || []).map((w, i) => <li key={i}>{w}</li>)}
           </ul>
         </Card>
       )}
@@ -454,16 +551,16 @@ export default function MonthlySchedule() {
                 size="small"
                 rowKey="employee_id"
                 columns={[
-                  { 
-                    title: '員工姓名', 
-                    dataIndex: 'employee_name', 
+                  {
+                    title: '員工姓名',
+                    dataIndex: 'employee_name',
                     key: 'name',
                     width: 120,
                     render: (text) => <strong>{text}</strong>
                   },
-                  { 
-                    title: '循環原始總假', 
-                    dataIndex: 'total_leave', 
+                  {
+                    title: '循環原始總假',
+                    dataIndex: 'total_leave',
                     key: 'total',
                     align: 'center',
                     width: 110,
@@ -471,8 +568,8 @@ export default function MonthlySchedule() {
                       return `${val} 天`;
                     }
                   },
-                  { 
-                    title: '本月應休（目標）', 
+                  {
+                    title: '本月應休（目標）',
                     key: 'monthly_quota',
                     align: 'center',
                     width: 130,
@@ -487,36 +584,36 @@ export default function MonthlySchedule() {
                       );
                     }
                   },
-                  { 
-                    title: '本月已排 (休)', 
+                  {
+                    title: '本月已排 (休)',
                     key: 'month_used',
                     align: 'center',
                     width: 110,
                     render: (_, record) => {
-                      const mySlots = slots.filter(s => 
-                        s.employee_id === record.employee_id && 
-                        s.cycle_index === stat.cycle_index && 
+                      const mySlots = (slots || []).filter(s =>
+                        s.employee_id === record.employee_id &&
+                        s.cycle_index === stat.cycle_index &&
                         s.shift_type === 'off'
                       );
                       return <Tag color="orange">{mySlots.length} 天</Tag>;
                     }
                   },
-                  { 
-                    title: '循環累計已用', 
-                    dataIndex: 'used_leave', 
+                  {
+                    title: '循環累計已用',
+                    dataIndex: 'used_leave',
                     key: 'used',
                     align: 'center',
                     render: (val) => `${val} 天`
                   },
-                  { 
-                    title: '最終剩餘', 
+                  {
+                    title: '最終剩餘',
                     key: 'final_remaining',
                     align: 'center',
                     width: 100,
                     render: (_: any, record: any) => {
-                      const mySlots = slots.filter(s => 
-                        s.employee_id === record.employee_id && 
-                        s.cycle_index === stat.cycle_index && 
+                      const mySlots = (slots || []).filter(s =>
+                        s.employee_id === record.employee_id &&
+                        s.cycle_index === stat.cycle_index &&
                         s.shift_type === 'off'
                       );
                       const monthUsed = mySlots.length;
@@ -556,8 +653,8 @@ export default function MonthlySchedule() {
         okText="確認並產出班表"
       >
         <p style={{ color: '#666', marginBottom: 16 }}>
-          請確認每位員工在該循環「可排休假總天數」。<br/>
-          <span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>※ C1 為本月結束之循環，請「直接輸入在 4 月份還剩下幾天假」即可。(系統原始總假不受影響)</span><br/>
+          請確認每位員工在該循環「可排休假總天數」。<br />
+          <span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>※ C1 為本月結束之循環，請「直接輸入在 4 月份還剩下幾天假」即可。(系統原始總假不受影響)</span><br />
           <span style={{ color: '#52c41a', fontWeight: 'bold' }}>※ 其餘循環由系統自動結算原始總假，並依本月天數比例進行發假，無法手動更改。</span>
         </p>
         <Form layout="vertical">
@@ -587,9 +684,9 @@ export default function MonthlySchedule() {
                               addonAfter="天"
                             />
                           ) : (
-                            <div style={{ 
-                              padding: '4px 11px', background: '#f5f5f5', border: '1px solid #d9d9d9', 
-                              borderRadius: 4, color: '#aaabbb' 
+                            <div style={{
+                              padding: '4px 11px', background: '#f5f5f5', border: '1px solid #d9d9d9',
+                              borderRadius: 4, color: '#aaabbb'
                             }}>
                               {initLeaveValues[key] ?? 0} 天 (系統算好不給改)
                             </div>
@@ -603,6 +700,62 @@ export default function MonthlySchedule() {
           ))}
         </Form>
       </Modal>
+
+      {/* 儲存版本 Modal */}
+      <Modal
+        title="儲存班表版本"
+        open={versionModalOpen}
+        onOk={handleSaveVersion}
+        onCancel={() => setVersionModalOpen(false)}
+        okText="儲存"
+        cancelText="取消"
+      >
+        <p>請輸入一個好辨識的名稱（例如：初稿、修訂 V1、最終確認版）</p>
+        <Input 
+          placeholder="版本名稱" 
+          value={versionName} 
+          onChange={(e) => setVersionName(e.target.value)} 
+          onPressEnter={handleSaveVersion}
+        />
+      </Modal>
+
+      {/* 版本紀錄 Drawer */}
+      <Drawer
+        title="版本歷史紀錄"
+        placement="right"
+        onClose={() => setHistoryOpen(false)}
+        open={historyOpen}
+        width={400}
+      >
+        <List
+          dataSource={versions}
+          renderItem={(item) => (
+            <List.Item
+              actions={[
+                <Button type="link" onClick={() => handleRestoreVersion(item.ID)}>載入</Button>,
+                <Popconfirm 
+                  title="確定要刪除此版本嗎？" 
+                  onConfirm={() => handleDeleteVersion(item.ID)}
+                  okText="確定"
+                  cancelText="取消"
+                >
+                  <Button type="link" danger icon={<DeleteOutlined />} />
+                </Popconfirm>
+              ]}
+            >
+              <List.Item.Meta
+                title={item.version_name}
+                description={
+                  <div style={{ fontSize: 12 }}>
+                    <div>建立時間: {new Date(item.CreatedAt).toLocaleString()}</div>
+                    <div>建立者: {item.creator}</div>
+                  </div>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      </Drawer>
     </div>
   );
 }

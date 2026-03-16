@@ -152,7 +152,10 @@ export const updateCycleBalance = (data: {
 }) => api.put('/monthly/cycle-balance', data);
 
 export const updateMonthlySlot = (slotId: number, shiftType: string) =>
-  api.put(`/monthly/slots/${slotId}`, { shift_type: shiftType });
+  api.put<{ message: string; slot: MonthlySlot; warnings?: string[]; summaries?: LeaveSummaryItem[]; boundaries?: CycleBoundary[] }>(
+    `/monthly/slots/${slotId}`,
+    { shift_type: shiftType }
+  );
 
 // --- 月度預假 ---
 export interface MonthlyPreScheduledLeave {
@@ -170,3 +173,27 @@ export const createMonthlyPreLeave = (data: { employee_id: number; date: string;
 
 export const deleteMonthlyPreLeave = (id: number) =>
   api.delete(`/monthly/pre-leaves/${id}`);
+
+// --- 班表版本管理 ---
+export interface MonthlyScheduleVersion {
+  ID: number;
+  CreatedAt: string;
+  year: number;
+  month: number;
+  version_name: string;
+  creator: string;
+}
+
+export const listMonthlyVersions = (year: number, month: number) =>
+  api.get<MonthlyScheduleVersion[]>(`/monthly/${year}/${month}/versions`);
+
+export const saveMonthlyVersion = (year: number, month: number, data: { version_name: string; creator?: string }) =>
+  api.post(`/monthly/${year}/${month}/versions`, data);
+
+export const restoreMonthlyVersion = (versionId: number) =>
+  api.post<{ message: string; slots: MonthlySlot[]; warnings: string[]; summaries: LeaveSummaryItem[]; boundaries: CycleBoundary[] }>(
+    `/monthly/versions/${versionId}/restore`
+  );
+
+export const deleteMonthlyVersion = (versionId: number) =>
+  api.delete(`/monthly/versions/${versionId}`);

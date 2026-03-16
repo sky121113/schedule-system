@@ -35,3 +35,24 @@ type CycleLeaveBalance struct {
 	OfflineUsed int  `gorm:"not null;default:0" json:"offline_used"`                // 在使用本系統前已扣除或線下使用的假
 	MonthQuota  int  `gorm:"not null;default:-1" json:"month_quota"`                // 使用者手動指定的本月應休天數 (-1 = 未設定，由系統按比例算)
 }
+
+// MonthlyScheduleVersion 月度班表版本快照
+type MonthlyScheduleVersion struct {
+	gorm.Model
+	Year        int    `gorm:"not null;index:idx_ver_year_month" json:"year"`
+	Month       int    `gorm:"not null;index:idx_ver_year_month" json:"month"`
+	VersionName string `gorm:"type:varchar(100);not null" json:"version_name"` // 版本名稱
+	Creator     string `gorm:"type:varchar(50)" json:"creator"`                // 建立者 (選填)
+}
+
+// MonthlySlotVersion 月度班表版本的快照格子
+type MonthlySlotVersion struct {
+	gorm.Model
+	VersionID  uint      `gorm:"not null;index" json:"version_id"`
+	Date       time.Time `gorm:"type:date;not null" json:"date"`
+	ShiftType  string    `gorm:"type:varchar(20);not null" json:"shift_type"`
+	EmployeeID uint      `gorm:"not null" json:"employee_id"`
+	CycleIndex int       `gorm:"not null" json:"cycle_index"`
+	DayOffset  int       `gorm:"not null" json:"day_offset"`
+}
+
