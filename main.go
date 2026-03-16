@@ -12,6 +12,9 @@ func main() {
 	// 自動建立資料表
 	db.RunMigrations()
 
+	// 初始化種子資料
+	db.SeedData()
+
 	// 設定路由
 	router := routes.SetupRouter()
 

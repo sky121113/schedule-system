@@ -1,107 +1,101 @@
 import { useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, theme } from 'antd';
-import { CalendarOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons';
-import ScheduleCalendar from './pages/ScheduleCalendar';
-import UserList from './pages/UserList';
-import './App.css';
+import { ConfigProvider, Layout, Menu, theme } from 'antd';
+import { TeamOutlined, CalendarOutlined, SettingOutlined, ScheduleOutlined } from '@ant-design/icons';
+import zhTW from 'antd/locale/zh_TW';
+import EmployeeManagement from './pages/EmployeeManagement';
+import StaffingSettings from './pages/StaffingSettings';
+import TemplateEditor from './pages/TemplateEditor';
+import MonthlySchedule from './pages/MonthlySchedule';
 
-const { Header, Sider, Content } = Layout;
-
-function AppContent() {
-    const [collapsed, setCollapsed] = useState(false);
-    const navigate = useNavigate();
-    const location = useLocation();
-    const {
-        token: { colorBgContainer, borderRadiusLG },
-    } = theme.useToken();
-
-    // 根據當前路徑設定選中的選單項
-    const getSelectedKey = () => {
-        if (location.pathname === '/schedule') return '1';
-        if (location.pathname === '/users') return '2';
-        return '1';
-    };
-
-    // 處理選單點擊
-    const handleMenuClick = (e: { key: string }) => {
-        switch (e.key) {
-            case '1':
-                navigate('/schedule');
-                break;
-            case '2':
-                navigate('/users');
-                break;
-            case '3':
-                // 系統設定頁面尚未實作
-                console.log('系統設定功能開發中...');
-                break;
-        }
-    };
-
-    return (
-        <Layout style={{ minHeight: '100vh' }}>
-            <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed}>
-                <div style={{
-                    height: '64px',
-                    margin: '16px',
-                    background: 'rgba(255, 255, 255, 0.2)',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'white',
-                    fontSize: '20px',
-                    fontWeight: 'bold'
-                }}>
-                    {collapsed ? '排' : '排班系統'}
-                </div>
-                <Menu
-                    theme="dark"
-                    selectedKeys={[getSelectedKey()]}
-                    mode="inline"
-                    onClick={handleMenuClick}
-                    items={[
-                        {
-                            key: '1',
-                            icon: <CalendarOutlined />,
-                            label: '班表行事曆',
-                        },
-                        {
-                            key: '2',
-                            icon: <UserOutlined />,
-                            label: '使用者管理',
-                        },
-                        {
-                            key: '3',
-                            icon: <SettingOutlined />,
-                            label: '系統設定',
-                        },
-                    ]}
-                />
-            </Sider>
-            <Layout>
-                <Header style={{ padding: '0 24px', background: colorBgContainer }}>
-                    <h2 style={{ margin: 0 }}>排班管理系統</h2>
-                </Header>
-                <Content style={{ margin: '24px 16px', padding: 24, background: colorBgContainer, borderRadius: borderRadiusLG }}>
-                    <Routes>
-                        <Route path="/" element={<Navigate to="/schedule" replace />} />
-                        <Route path="/schedule" element={<ScheduleCalendar />} />
-                        <Route path="/users" element={<UserList />} />
-                    </Routes>
-                </Content>
-            </Layout>
-        </Layout>
-    );
-}
+const { Sider, Content, Header } = Layout;
 
 function App() {
-    return (
-        <BrowserRouter>
-            <AppContent />
-        </BrowserRouter>
-    );
+  const [current, setCurrent] = useState('template');
+
+  const menuItems = [
+    { key: 'monthly', icon: <ScheduleOutlined />, label: '月度班表' },
+    { key: 'template', icon: <CalendarOutlined />, label: '排班模板' },
+    { key: 'employees', icon: <TeamOutlined />, label: '員工管理' },
+    { key: 'staffing', icon: <SettingOutlined />, label: '人力需求' },
+  ];
+
+  const renderPage = () => {
+    switch (current) {
+      case 'monthly':
+        return <MonthlySchedule />;
+      case 'employees':
+        return <EmployeeManagement />;
+      case 'staffing':
+        return <StaffingSettings />;
+      case 'template':
+      default:
+        return <TemplateEditor />;
+    }
+  };
+
+  return (
+    <ConfigProvider
+      locale={zhTW}
+      theme={{
+        algorithm: theme.defaultAlgorithm,
+        token: {
+          colorPrimary: '#1677ff',
+          borderRadius: 8,
+        },
+      }}
+    >
+      <Layout style={{ minHeight: '100vh' }}>
+        <Sider
+          theme="light"
+          width={200}
+          style={{
+            borderRight: '1px solid #f0f0f0',
+          }}
+        >
+          <div
+            style={{
+              height: 64,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderBottom: '1px solid #f0f0f0',
+              fontWeight: 'bold',
+              fontSize: 16,
+            }}
+          >
+            🗓️ 排班系統
+          </div>
+          <Menu
+            mode="inline"
+            selectedKeys={[current]}
+            onClick={(e) => setCurrent(e.key)}
+            items={menuItems}
+            style={{ borderRight: 0 }}
+          />
+        </Sider>
+        <Layout>
+          <Header
+            style={{
+              background: '#fff',
+              padding: '0 24px',
+              borderBottom: '1px solid #f0f0f0',
+              display: 'flex',
+              alignItems: 'center',
+              fontSize: 18,
+              fontWeight: 600,
+            }}
+          >
+            {menuItems.find((m) => m.key === current)?.label}
+          </Header>
+          <Content style={{ padding: 24, background: '#f5f5f5', overflow: 'auto' }}>
+            <div style={{ background: '#fff', padding: 24, borderRadius: 8, minHeight: 'calc(100vh - 130px)' }}>
+              {renderPage()}
+            </div>
+          </Content>
+        </Layout>
+      </Layout>
+    </ConfigProvider>
+  );
 }
 
 export default App;
