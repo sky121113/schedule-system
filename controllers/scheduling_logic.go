@@ -75,6 +75,15 @@ func canAssignV6(
 		return false
 	}
 
+	// R5: 個人班別天數上限
+	if ec != nil {
+		if maxD, ok := ec.MaxDays[shiftType]; ok {
+			if shiftCount[empID][shiftType] >= maxD {
+				return false
+			}
+		}
+	}
+
 	// C3: 每人每天最多一班 (已有班或已排假)
 	if existing, ok := schedule[day][empID]; ok && existing != "" {
 		return false
@@ -105,8 +114,8 @@ func canAssignV6(
 		}
 	}
 
-	// C7: 做 6 休 1 (雙向檢查)
-	if ec == nil || !ec.IsDay88Primary {
+	// C7: 做 6 休 1 (雙向檢查) - 所有員工都適用（含 J）
+	{
 		backwardStreak := 0
 		for d := day - 1; d >= 0; d-- {
 			s := schedule[d][empID]
@@ -150,6 +159,15 @@ func canAssignV6Relaxed(
 	}
 	if ec != nil && ec.Banned[shiftType] {
 		return false
+	}
+
+	// R5: 個人班別天數上限
+	if ec != nil {
+		if maxD, ok := ec.MaxDays[shiftType]; ok {
+			if shiftCount[empID][shiftType] >= maxD {
+				return false
+			}
+		}
 	}
 	if shiftType == "day" || shiftType == "day88" {
 		if day > 0 {
@@ -278,6 +296,14 @@ func findBestCandidateV3(
 				continue
 			}
 		}
+		// R5: 強制模式也要檢查班別天數上限
+		if ec, ok := constraints[emp.ID]; ok {
+			if maxD, exists := ec.MaxDays[shiftType]; exists {
+				if shiftCount[emp.ID][shiftType] >= maxD {
+					continue
+				}
+			}
+		}
 		forceEligible = append(forceEligible, emp.ID)
 	}
 	if len(forceEligible) > 0 {
@@ -334,6 +360,23 @@ func fillConsecutiveV3(
 			}
 
 			if canDoAll && actualRun >= 2 {
+				// R5: 檢查整段分配後是否會超過 MaxDays 上限
+				if ec, ok := constraints[empID]; ok {
+					if maxD, exists := ec.MaxDays[shiftType]; exists {
+						allowed := maxD - shiftCount[empID][shiftType]
+						if allowed <= 0 {
+							d++
+							continue
+						}
+						if actualRun > allowed {
+							actualRun = allowed
+						}
+						if actualRun < 2 {
+							d++
+							continue
+						}
+					}
+				}
 				for r := 0; r < actualRun; r++ {
 					schedule[d+r][empID] = shiftType
 					shiftCount[empID][shiftType]++

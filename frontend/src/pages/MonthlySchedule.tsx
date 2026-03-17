@@ -6,6 +6,7 @@ import {
 } from 'antd';
 import {
   LeftOutlined, RightOutlined, ThunderboltOutlined, EditOutlined,
+  HistoryOutlined, SaveOutlined, DeleteOutlined
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import {
@@ -16,8 +17,7 @@ import {
   type MonthlySlot, type CycleBoundary, type LeaveSummaryItem,
   type MonthlyPreScheduledLeave, type MonthlyScheduleVersion,
 } from '../services/api';
-import { HistoryOutlined, SaveOutlined, DeleteOutlined } from '@ant-design/icons';
-import type { Employee } from '../types';
+import type { Employee, StaffingRequirement } from '../types';
 import { SHIFT_CONFIG, type ShiftType } from '../types';
 
 // 月度班表頁面
@@ -34,6 +34,7 @@ export default function MonthlySchedule() {
   const [leaveSummaries, setLeaveSummaries] = useState<LeaveSummaryItem[]>([]);
   const [hasSchedule, setHasSchedule] = useState(false);
   const [monthlyPreLeaves, setMonthlyPreLeaves] = useState<MonthlyPreScheduledLeave[]>([]);
+  const [staffingRequirements, setStaffingRequirements] = useState<StaffingRequirement[]>([]);
 
   // 初始假期設定彈窗
   const [initModalOpen, setInitModalOpen] = useState(false);
@@ -53,8 +54,9 @@ export default function MonthlySchedule() {
       setSlots(res.data.slots || []);
       setEmpMap(res.data.employees || {});
       setBoundaries(res.data.boundaries || []);
+      setStaffingRequirements(res.data.requirements || []);
       setHasSchedule(true);
-      setWarnings([]); // Clear warnings on successful load
+      setWarnings(res.data.warnings || []);
 
       // 載入假期摘要
       const leaveRes = await getMonthlyLeaveSummary(year, month);
@@ -185,7 +187,7 @@ export default function MonthlySchedule() {
     try {
       const res = await restoreMonthlyVersion(vId);
       const { slots: newSlots, warnings: newWarnings, summaries: newSummaries, boundaries: newBoundaries } = res.data;
-      
+
       if (newSlots) setSlots(newSlots);
       if (newWarnings) setWarnings(newWarnings);
       if (newSummaries) setLeaveSummaries(newSummaries);
@@ -217,7 +219,7 @@ export default function MonthlySchedule() {
       setSlots((prev) =>
         prev.map((s) => (s.ID === slotId ? { ...s, shift_type: newShift } : s))
       );
-      
+
       // 動態更新警告與假期計算結果
       if (res.data.warnings) {
         setWarnings(res.data.warnings);
@@ -308,15 +310,47 @@ export default function MonthlySchedule() {
       const isWeekend = weekday === 0 || weekday === 6;
       const isBoundary = boundaryDates.has(day);
 
+      // 計算當日人力
+      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const daySlots = (slots || []).filter(s => s.date.startsWith(dateStr));
+      const counts: Record<string, number> = { day: 0, evening: 0, night: 0 };
+      let hasDay88 = false;
+      daySlots.forEach(s => {
+        if (s.shift_type === 'day' || s.shift_type === 'day88') counts.day++;
+        if (s.shift_type === 'evening') counts.evening++;
+        if (s.shift_type === 'night') counts.night++;
+        if (s.shift_type === 'day88') hasDay88 = true;
+      });
+
+      const dailyReqs = staffingRequirements.filter(r => r.weekday === weekday);
+      
+      // 輔助函式：取得指定班別的需求量
+      const getRequirementValue = (st: string) => {
+        const r = dailyReqs.find(rr => rr.shift_type === st);
+        return r ? (hasDay88 ? r.min_count_with_day88 : r.min_count) : 0;
+      };
+
+      const shortageAnywhere = 
+        counts.day < getRequirementValue('day') ||
+        counts.evening < getRequirementValue('evening') ||
+        counts.night < getRequirementValue('night');
+
       return {
         title: (
           <div style={{ textAlign: 'center' as const, lineHeight: 1.2 }}>
-            <div style={{ fontSize: 12, color: isWeekend ? '#ff4d4f' : '#666' }}>
+            <div style={{ fontSize: 12, color: shortageAnywhere ? '#ff4d4f' : (isWeekend ? '#ff4d4f' : '#666') }}>
               {weekdayNames[weekday]}
             </div>
-            <div style={{ fontWeight: 600 }}>{day}</div>
+            <div style={{ 
+              fontWeight: 600, 
+              color: shortageAnywhere ? '#ff4d4f' : 'inherit',
+              textDecoration: shortageAnywhere ? 'underline' : 'none'
+            }}>
+              {day}
+            </div>
           </div>
         ),
+
         dataIndex: `day_${day}`,
         key: `day_${day}`,
         width: 50,
@@ -513,6 +547,67 @@ export default function MonthlySchedule() {
             bordered
             scroll={{ x: 80 + daysInMonth * 50 }}
             style={{ marginBottom: 16 }}
+            summary={() => (
+              <Table.Summary fixed>
+                {['☀️', '🌙', '🌑'].map((emoji, idx) => {
+                  const shiftType = ['day', 'evening', 'night'][idx];
+                  return (
+                    <Table.Summary.Row key={shiftType} style={{ background: '#fafafa' }}>
+                      <Table.Summary.Cell index={0} align="right">
+                        <strong>{emoji}</strong>
+                      </Table.Summary.Cell>
+                      {dates.map((day, dIdx) => {
+                        const dateObj = new Date(year, month - 1, day);
+                        const weekday = dateObj.getDay();
+                        const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                        const daySlots = (slots || []).filter(s => s.date.startsWith(dateStr));
+                        
+                        let actual = 0;
+                        let hasDay88 = false;
+                        daySlots.forEach(s => {
+                          if (shiftType === 'day' && (s.shift_type === 'day' || s.shift_type === 'day88')) actual++;
+                          else if (s.shift_type === shiftType) actual++;
+                          if (s.shift_type === 'day88') hasDay88 = true;
+                        });
+
+                        const req = staffingRequirements.find(r => r.weekday === weekday && r.shift_type === shiftType);
+                        const needed = req ? (hasDay88 ? req.min_count_with_day88 : req.min_count) : 0;
+                        const isLess = actual < needed;
+                        const isBoundary = boundaryDates.has(day);
+
+                        return (
+                          <Table.Summary.Cell 
+                            key={dIdx} 
+                            index={dIdx + 1}
+                          >
+                            <div style={{ 
+                              textAlign: 'center', 
+                              color: isLess ? '#ff4d4f' : '#8c8c8c',
+                              background: isLess ? '#fff1f0' : 'transparent',
+                              borderRight: isBoundary ? '3px solid #ff4d4f' : undefined,
+                              fontSize: 11,
+                              padding: '4px 0',
+                              margin: '-16px -8px', 
+                              height: '100%',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'center'
+                            }}>
+                              <div style={{ fontWeight: isLess ? 'bold' : 'normal' }}>
+                                {actual}
+                              </div>
+                              <div style={{ fontSize: 9, opacity: 0.7, borderTop: '1px solid #eee' }}>
+                                {needed}
+                              </div>
+                            </div>
+                          </Table.Summary.Cell>
+                        );
+                      })}
+                    </Table.Summary.Row>
+                  );
+                })}
+              </Table.Summary>
+            )}
           />
         ) : (
           <Card style={{ textAlign: 'center', padding: 40 }}>

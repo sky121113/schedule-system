@@ -117,6 +117,8 @@ export interface MonthlyScheduleResponse {
   slots: MonthlySlot[];
   employees: Record<number, string>;
   boundaries: CycleBoundary[];
+  requirements?: StaffingRequirement[];
+  warnings?: string[];
 }
 
 export interface LeaveSummaryItem {

@@ -57,33 +57,7 @@ func SetupRouter() *gin.Engine {
 			staffing.POST("/batch", controllers.BatchUpsertStaffingRequirements)
 		}
 
-		// 循環模板
-		templates := api.Group("/templates")
-		{
-			templates.GET("/", controllers.GetTemplates)
-			templates.GET("/:id", controllers.GetTemplate)
-			templates.POST("/", controllers.CreateTemplate)
-			templates.DELETE("/:id", controllers.DeleteTemplate)
-
-			// 排班格
-			templates.POST("/slots", controllers.SetSlot)
-			templates.DELETE("/slots/:id", controllers.RemoveSlot)
-			templates.DELETE("/:id/slots", controllers.ClearTemplateSlots)
-
-			// 自動排班
-			templates.POST("/:id/auto-schedule", controllers.AutoSchedule)
-
-			// 日曆展開
-			templates.GET("/:id/calendar", controllers.GetTemplateCalendar)
-
-			// 預假
-			templates.GET("/:id/pre-leaves", controllers.GetPreScheduledLeaves)
-			templates.POST("/:id/pre-leaves", controllers.SetPreScheduledLeave)
-			templates.DELETE("/:id/pre-leaves/:leaveId", controllers.DeletePreScheduledLeave)
-
-			// 假期配額
-			templates.GET("/:id/leave-quota", controllers.CalculateLeaveQuota)
-		}
+		// (循環模板路由已移除，排班功能統一由月度排班處理)
 
 		// 月度班表
 		monthly := api.Group("/monthly")
