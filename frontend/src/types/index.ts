@@ -47,7 +47,7 @@ export interface TemplateSlot {
 }
 
 // 班別類型
-export type ShiftType = 'day' | 'day88' | 'evening' | 'night' | 'off';
+export type ShiftType = 'day' | 'day88' | 'evening' | 'night' | 'night88' | 'off';
 
 // 班別顏色與標籤
 export const SHIFT_CONFIG: Record<ShiftType, { label: string; color: string; bgColor: string }> = {
@@ -55,6 +55,7 @@ export const SHIFT_CONFIG: Record<ShiftType, { label: string; color: string; bgC
   day88: { label: '8-8', color: '#fa8c16', bgColor: '#fff7e6' },
   evening: { label: '小夜', color: '#722ed1', bgColor: '#f9f0ff' },
   night: { label: '大夜', color: '#1890ff', bgColor: '#e6f7ff' },
+  night88: { label: '夜8', color: '#0050b3', bgColor: '#bae0ff' },
   off: { label: '休', color: '#52c41a', bgColor: '#f6ffed' },
 };
 

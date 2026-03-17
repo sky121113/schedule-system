@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"schedule-system/db"
 	"schedule-system/models"
@@ -218,8 +219,7 @@ func GenerateMonthlySchedule(c *gin.Context) {
 		err := db.DB.Where("cycle_index = ? AND employee_id = ?", ib.CycleIndex, ib.EmployeeID).First(&balance).Error
 
 		if err == nil {
-			// 已有記錄：強制校正 TotalLeave 為系統預設值
-			balance.TotalLeave = defaultTotal
+			// 已有記錄：絕對尊重資料庫現有數值，不覆寫 TotalLeave
 			if isEndingThisMonth {
 				// C1: 直接存使用者的手動輸入值
 				balance.MonthQuota = ib.TotalLeave
@@ -545,7 +545,15 @@ func runMonthlySchedule(
 		// Round-Robin：每輪每人挑 1 天假，直到所有人配額用完
 		for {
 			anyAssigned := false
-			for _, emp := range employees {
+
+			// 隨機打亂員工順序，避免排序靠前的 A、B 永遠優先選到低需求日
+			shuffledEmployees := make([]models.Employee, len(employees))
+			copy(shuffledEmployees, employees)
+			rand.Shuffle(len(shuffledEmployees), func(i, j int) {
+				shuffledEmployees[i], shuffledEmployees[j] = shuffledEmployees[j], shuffledEmployees[i]
+			})
+
+			for _, emp := range shuffledEmployees {
 				if remaining[emp.ID] <= 0 {
 					continue
 				}
@@ -670,13 +678,153 @@ func runMonthlySchedule(
 	log.Printf("[Monthly] 步驟 3: 排大夜, 需要人數: %d", nightEmpsNeeded)
 	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "night", totalDays, 4, 2, nightEmpsNeeded, prevDaySchedule)
 
+	// ─── 步驟 3.5：升級大夜為 night88（R8 處理）⭐ ───
+	// 逐日檢查，若當日有 day88，則需一位 night88
+	// 優先尋找已排定 night 且昨日非 night88 的員工升級
+	log.Println("[Monthly] 步驟 3.5: 升級大夜為 night88")
+	for d := 0; d < totalDays; d++ {
+		// 檢查當天是否有 day88
+		hasDay88 := false
+		for _, emp := range employees {
+			if schedule[d][emp.ID] == "day88" {
+				hasDay88 = true
+				break
+			}
+		}
+		if !hasDay88 {
+			continue // 當天沒有 day88，不需要 night88
+		}
+
+		// 當天已有 night88 則跳過
+		hasNight88 := false
+		for _, emp := range employees {
+			if schedule[d][emp.ID] == "night88" {
+				hasNight88 = true
+				break
+			}
+		}
+		if hasNight88 {
+			continue
+		}
+
+		// 從已排 night 的員工中選一人升級為 night88
+		upgraded := false
+		var nightEmpIDs []uint
+		for _, emp := range employees {
+			if schedule[d][emp.ID] == "night" {
+				nightEmpIDs = append(nightEmpIDs, emp.ID)
+			}
+		}
+
+		for _, empID := range nightEmpIDs {
+			// R8: 前一天不可以是 night88
+			prevIsNight88 := false
+			if d > 0 {
+				prevIsNight88 = schedule[d-1][empID] == "night88"
+			} else if d == 0 && prevDaySchedule != nil {
+				prevIsNight88 = prevDaySchedule[empID] == "night88"
+			}
+			if prevIsNight88 {
+				continue
+			}
+			// R8: 後一天也不可以是 night88
+			if d+1 < totalDays && schedule[d+1][empID] == "night88" {
+				continue
+			}
+
+			// 升級：night → night88
+			schedule[d][empID] = "night88"
+			shiftCount[empID]["night"]--
+			shiftCount[empID]["night88"]++
+			upgraded = true
+			log.Printf("[R8-UPGRADE] Day %d: 員工 %d 從 night 升級為 night88", d, empID)
+			break
+		}
+
+		// 若無法從已排 night 的人升級，嘗試補位一位新的 night88
+		// 三層優先序：
+		//   (a) 找前後已有 night/night88 的人（天然滿足 R7）
+		//   (b) 配對分配：night88 + 相鄰天 night（確保 R7 連續 ≥ 2 天）
+		//   (c) 最終退路：單獨分配 night88（可能被 step 6.5 移除，但至少嘗試）
+		if !upgraded {
+			var fallbackID uint
+			// (a) 找前後已有 night/night88 的人
+			for _, emp := range employees {
+				if emp.IsDay88Primary {
+					continue
+				}
+				hasAdjacentNight := false
+				if d > 0 {
+					prev := schedule[d-1][emp.ID]
+					if prev == "night" || prev == "night88" {
+						hasAdjacentNight = true
+					}
+				}
+				if d+1 < totalDays {
+					next := schedule[d+1][emp.ID]
+					if next == "night" || next == "night88" {
+						hasAdjacentNight = true
+					}
+				}
+				if !hasAdjacentNight {
+					continue
+				}
+				if canAssignV6(emp.ID, schedule, shiftCount, constraints, d, "night88", totalDays, prevDaySchedule) {
+					fallbackID = emp.ID
+					break
+				}
+			}
+
+			// (b) 配對分配：同時排 night88 + 相鄰天 night，確保 R7
+			if fallbackID == 0 {
+				for _, emp := range employees {
+					if emp.IsDay88Primary {
+						continue
+					}
+					if !canAssignV6(emp.ID, schedule, shiftCount, constraints, d, "night88", totalDays, prevDaySchedule) {
+						continue
+					}
+					// 嘗試在隔天補一個 night（優先後一天）
+					pairDay := -1
+					if d+1 < totalDays && canAssignV6(emp.ID, schedule, shiftCount, constraints, d+1, "night", totalDays, prevDaySchedule) {
+						pairDay = d + 1
+					} else if d > 0 && schedule[d-1][emp.ID] == "" && canAssignV6(emp.ID, schedule, shiftCount, constraints, d-1, "night", totalDays, prevDaySchedule) {
+						pairDay = d - 1
+					}
+					if pairDay >= 0 {
+						fallbackID = emp.ID
+						// 分配配對的 night
+						schedule[pairDay][emp.ID] = "night"
+						shiftCount[emp.ID]["night"]++
+						log.Printf("[R8-PAIR] Day %d: 員工 %d 配對排 night (搭配 day %d 的 night88)", pairDay, emp.ID, d)
+						break
+					}
+				}
+			}
+
+			// (c) 最終退路
+			if fallbackID == 0 {
+				var emptyPreLeaves []models.PreScheduledLeave
+				fallbackID = findBestCandidateV3(employees, schedule, shiftCount, constraints, d, "night88", totalDays, emptyPreLeaves, prevDaySchedule)
+			}
+
+			if fallbackID != 0 {
+				schedule[d][fallbackID] = "night88"
+				shiftCount[fallbackID]["night88"]++
+				log.Printf("[R8-FALLBACK] Day %d: 補位員工 %d 排 night88", d, fallbackID)
+			} else {
+				log.Printf("[R8-WARNING] Day %d: 有 day88 但無法安排 night88", d)
+			}
+		}
+	}
+
 	// ─── 步驟 4：排小夜連續班段（直接復用 v6 fillConsecutiveV3）───
 	log.Printf("[Monthly] 步驟 4: 排小夜, 需要人數: %d", eveningEmpsNeeded)
 	fillConsecutiveV3(schedule, shiftCount, employees, constraints, "evening", totalDays, 4, 1, eveningEmpsNeeded, prevDaySchedule)
 
 	// DEBUG: 檢查特定日期之後的狀態
 	for _, id := range []uint{9, 4} { // I=9, D=4
-		log.Printf("[DEBUG-AFTER-STEP4] Emp %d: d=4(Apr5)=%s, d=5(Apr6)=%s, d=8(Apr9)=%s, d=9(Apr10)=%s", 
+		log.Printf("[DEBUG-AFTER-STEP4] Emp %d: d=4(Apr5)=%s, d=5(Apr6)=%s, d=8(Apr9)=%s, d=9(Apr10)=%s",
 			id, schedule[4][id], schedule[5][id], schedule[8][id], schedule[9][id])
 	}
 
@@ -745,9 +893,6 @@ func runMonthlySchedule(
 			for n := current; n < minNeeded; n++ {
 				bestID := findBestCandidateV3(employees, schedule, shiftCount, constraints, d, st, totalDays, emptyPreLeaves, prevDaySchedule)
 				if bestID != 0 {
-					if (d == 5 || d == 9) && st == "day" {
-						log.Printf("[DEBUG-STEP6-ASSIGN] Day %d: %s -> %d (Prev: %s)", d, st, bestID, schedule[d-1][bestID])
-					}
 					schedule[d][bestID] = st
 					shiftCount[bestID][st]++
 				}
@@ -760,27 +905,57 @@ func runMonthlySchedule(
 		if emp.IsDay88Primary {
 			continue
 		}
-		for _, st := range []string{"night", "evening"} {
+		for _, st := range []string{"night", "night88", "evening"} {
 			for d := 0; d < totalDays; d++ {
 				if schedule[d][emp.ID] != st {
 					continue
 				}
 				// 檢查是否為孤立的 1 天班段
-				prevSame := d > 0 && schedule[d-1][emp.ID] == st
-				nextSame := d+1 < totalDays && schedule[d+1][emp.ID] == st
+				// night 與 night88 屬於同家族，互相視為「相鄰同類」
+				isNightFamily := (st == "night" || st == "night88")
+				prevSame := false
+				if d > 0 {
+					prev := schedule[d-1][emp.ID]
+					if isNightFamily {
+						prevSame = prev == "night" || prev == "night88"
+					} else {
+						prevSame = prev == st
+					}
+				} else if d == 0 && prevDaySchedule != nil {
+					prev := prevDaySchedule[emp.ID]
+					if isNightFamily {
+						prevSame = prev == "night" || prev == "night88"
+					} else {
+						prevSame = prev == st
+					}
+				}
+				nextSame := false
+				if d+1 < totalDays {
+					next := schedule[d+1][emp.ID]
+					if isNightFamily {
+						nextSame = next == "night" || next == "night88"
+					} else {
+						nextSame = next == st
+					}
+				}
+
 				if prevSame || nextSame {
 					continue // 至少有一邊相鄰，不是孤立 1 天
 				}
-				// 孤立 1 天 — 嘗試延伸到隔天
+				// 孤立 1 天 — 嘗試延伸到隔天（night88 延伸用 night，避免連續 night88）
+				extendSt := st
+				if st == "night88" {
+					extendSt = "night" // 延伸時用普通大夜，避免違反 R8（不可連續 night88）
+				}
 				extended := false
-				if d+1 < totalDays && canAssignV6(emp.ID, schedule, shiftCount, constraints, d+1, st, totalDays, prevDaySchedule) {
-					schedule[d+1][emp.ID] = st
-					shiftCount[emp.ID][st]++
+				if d+1 < totalDays && canAssignV6(emp.ID, schedule, shiftCount, constraints, d+1, extendSt, totalDays, prevDaySchedule) {
+					schedule[d+1][emp.ID] = extendSt
+					shiftCount[emp.ID][extendSt]++
 					extended = true
 				}
 				if !extended {
 					// 無法延伸 → 移除此孤立班段，讓步驟 7 重新分配
-					log.Printf("[R8] 移除孤立 %s 班段: Day %d, Emp %d (%s)", st, d, emp.ID, emp.Name)
+					log.Printf("[R7] 移除孤立 %s 班段: Day %d, Emp %d (%s)", st, d, emp.ID, emp.Name)
 					schedule[d][emp.ID] = ""
 					shiftCount[emp.ID][st]--
 				}
@@ -895,23 +1070,34 @@ func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Emp
 			}
 		}
 
+		// 檢查總在職人數與 R8 約束 (night88 數量)
+		hasDay88 := false
+		actualNight88 := 0
+		for _, emp := range employees {
+			if schedule[d][emp.ID] == "day88" {
+				hasDay88 = true
+			}
+			if schedule[d][emp.ID] == "night88" {
+				actualNight88++
+			}
+		}
+
+		if hasDay88 && actualNight88 == 0 {
+			warn := fmt.Sprintf("%d/%02d/%02d 違反 R8 約束: 有安排白班 8-8，但無人安排大夜 8-8 (night88)",
+				date.Year(), date.Month(), date.Day())
+			warnings = append(warnings, warn)
+		}
+
 		// 檢查每個班別的需求
 		for _, st := range []string{"day", "evening", "night"} {
 			req := reqMap[requirementKey{weekday, st}]
 			minNeeded := req.MinCount
 
-			// 判斷是否有 Day88 主力，影響 minNeededWithDay88
-			has88 := false
-			for _, emp := range employees {
-				if emp.IsDay88Primary && (schedule[d][emp.ID] == "day88" || (st == "day" && schedule[d][emp.ID] == "day88")) {
-					has88 = true
-					break
-				}
-			}
-			if st != "day" && has88 {
+			// 判斷是否有 Day88，影響 minNeededWithDay88
+			if st != "day" && hasDay88 {
 				minNeeded = req.MinCountWithDay88
-			} else if st == "day" && has88 {
-				// Day班需求，如果Day88主力在，則Day88主力也算Day班人力
+			} else if st == "day" && hasDay88 {
+				// Day班需求，如果Day88在，則Day88也算Day班人力
 				minNeeded = req.MinCountWithDay88
 			}
 
@@ -921,6 +1107,9 @@ func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Emp
 					current++
 				}
 				if st == "day" && schedule[d][emp.ID] == "day88" {
+					current++
+				}
+				if st == "night" && schedule[d][emp.ID] == "night88" {
 					current++
 				}
 			}
@@ -1019,7 +1208,7 @@ func generateLeaveSummaries(year int, month int) []gin.H {
 			db.DB.Model(&models.MonthlySlot{}).
 				Where("cycle_index = ? AND employee_id = ? AND shift_type = 'off' AND date < ?", b.CycleIndex, emp.ID, firstDay).
 				Count(&usedBeforeThisMonth)
-			
+
 			// 加上外部額外紀錄的已用天數 (若有)
 			actualUsedLeave := int(usedBeforeThisMonth) + balance.OfflineUsed
 
@@ -1078,7 +1267,7 @@ func UpdateMonthlySlot(c *gin.Context) {
 	}
 
 	// 驗證班別有效性
-	validShifts := map[string]bool{"day": true, "evening": true, "night": true, "day88": true, "off": true}
+	validShifts := map[string]bool{"day": true, "evening": true, "night": true, "day88": true, "night88": true, "off": true}
 	if !validShifts[input.ShiftType] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "無效的班別: " + input.ShiftType})
 		return
@@ -1452,4 +1641,3 @@ func DeleteMonthlyVersion(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "版本已徹底刪除"})
 }
-

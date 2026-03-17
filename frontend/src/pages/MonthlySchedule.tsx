@@ -105,11 +105,11 @@ export default function MonthlySchedule() {
         const existing = leaveSummaries.find(s => s.employee_id === emp.ID && s.cycle_index === b.cycle_index);
 
         if (b.cycle_index === 1) {
-          // C1 強制預設顯示 3 天 (或從現有餘額抓取 current_month_quota)
-          defaults[key] = (existing && existing.current_month_quota > 0) ? existing.current_month_quota : 3;
+          // C1 優先使用現有設定，未設定時才預設 3 天
+          defaults[key] = (existing && existing.current_month_quota !== undefined) ? existing.current_month_quota : 3;
         } else {
           // 其他循環預設顯示「總假期」
-          defaults[key] = (existing && existing.total_leave > 0) ? existing.total_leave : b.default_total_leave;
+          defaults[key] = (existing && existing.total_leave !== undefined) ? existing.total_leave : b.default_total_leave;
         }
       }
     }
@@ -318,7 +318,7 @@ export default function MonthlySchedule() {
       daySlots.forEach(s => {
         if (s.shift_type === 'day' || s.shift_type === 'day88') counts.day++;
         if (s.shift_type === 'evening') counts.evening++;
-        if (s.shift_type === 'night') counts.night++;
+        if (s.shift_type === 'night' || s.shift_type === 'night88') counts.night++;
         if (s.shift_type === 'day88') hasDay88 = true;
       });
 
@@ -566,6 +566,7 @@ export default function MonthlySchedule() {
                         let hasDay88 = false;
                         daySlots.forEach(s => {
                           if (shiftType === 'day' && (s.shift_type === 'day' || s.shift_type === 'day88')) actual++;
+                          else if (shiftType === 'night' && (s.shift_type === 'night' || s.shift_type === 'night88')) actual++;
                           else if (s.shift_type === shiftType) actual++;
                           if (s.shift_type === 'day88') hasDay88 = true;
                         });

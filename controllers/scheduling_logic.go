@@ -70,26 +70,39 @@ func canAssignV6(
 		return false // 只能排 day88
 	}
 
-	// C4: 個人禁排班別
-	if ec != nil && ec.Banned[shiftType] {
-		return false
+	// R4: 個人禁排班別
+	if ec != nil {
+		if ec.Banned[shiftType] {
+			return false
+		}
+		if shiftType == "night88" && ec.Banned["night"] {
+			return false
+		}
 	}
 
 	// R5: 個人班別天數上限
 	if ec != nil {
-		if maxD, ok := ec.MaxDays[shiftType]; ok {
-			if shiftCount[empID][shiftType] >= maxD {
-				return false
+		if shiftType == "night" || shiftType == "night88" {
+			if maxD, ok := ec.MaxDays["night"]; ok {
+				if shiftCount[empID]["night"]+shiftCount[empID]["night88"] >= maxD {
+					return false
+				}
+			}
+		} else {
+			if maxD, ok := ec.MaxDays[shiftType]; ok {
+				if shiftCount[empID][shiftType] >= maxD {
+					return false
+				}
 			}
 		}
 	}
 
-	// C3: 每人每天最多一班 (已有班或已排假)
+	// R3: 每人每天最多一班 (已有班或已排假)
 	if existing, ok := schedule[day][empID]; ok && existing != "" {
 		return false
 	}
 
-	// C1, C2: 夜班 → 隔天白班 ❌
+	// R1, R2: 夜班 → 隔天白班 ❌
 	if shiftType == "day" || shiftType == "day88" {
 		if day > 0 {
 			prev := schedule[day-1][empID]
@@ -111,6 +124,18 @@ func canAssignV6(
 			if next == "day" || next == "day88" {
 				return false
 			}
+		}
+	}
+
+	// R8: night88 不可連續兩天 (往後檢查這天如果排 night88 下天不能是, 往前檢查前天不能是)
+	if shiftType == "night88" {
+		if day > 0 && schedule[day-1][empID] == "night88" {
+			return false
+		} else if day == 0 && externalPrevDayShift != nil && externalPrevDayShift[empID] == "night88" {
+			return false
+		}
+		if day+1 < totalDays && schedule[day+1][empID] == "night88" {
+			return false
 		}
 	}
 
@@ -157,15 +182,28 @@ func canAssignV6Relaxed(
 	if ec != nil && ec.IsDay88Primary && shiftType != "day88" {
 		return false
 	}
-	if ec != nil && ec.Banned[shiftType] {
-		return false
+	if ec != nil {
+		if ec.Banned[shiftType] {
+			return false
+		}
+		if shiftType == "night88" && ec.Banned["night"] {
+			return false
+		}
 	}
 
 	// R5: 個人班別天數上限
 	if ec != nil {
-		if maxD, ok := ec.MaxDays[shiftType]; ok {
-			if shiftCount[empID][shiftType] >= maxD {
-				return false
+		if shiftType == "night" || shiftType == "night88" {
+			if maxD, ok := ec.MaxDays["night"]; ok {
+				if shiftCount[empID]["night"]+shiftCount[empID]["night88"] >= maxD {
+					return false
+				}
+			}
+		} else {
+			if maxD, ok := ec.MaxDays[shiftType]; ok {
+				if shiftCount[empID][shiftType] >= maxD {
+					return false
+				}
 			}
 		}
 	}
@@ -198,7 +236,7 @@ func canAssignV6Relaxed(
 
 // isNightShift 判斷是否為會產生休息時間衝突的夜間班別
 func isNightShift(st string) bool {
-	return st == "night" || st == "evening"
+	return st == "night" || st == "evening" || st == "night88"
 }
 
 // findBestCandidateV3 尋找最適合排入特定日期的員工
@@ -399,8 +437,10 @@ func pickLowestWork(ids []uint, shiftCount map[uint]map[string]int) uint {
 	minWork := 999
 	for _, id := range ids {
 		work := 0
-		for _, c := range shiftCount[id] {
-			work += c
+		for shiftType, c := range shiftCount[id] {
+			if shiftType != "off" && shiftType != "pre_off" && shiftType != "" {
+				work += c
+			}
 		}
 		if work < minWork {
 			minWork = work
