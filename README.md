@@ -33,14 +33,24 @@
 ### 1. 後端 (Go Server)
 後端服務負責 API 提供與排班演算法計算。
 
-```bash
+### 2. 啟動後端服務
+
+#### 一般啟動 (手動重啟)
+```powershell
 # 確保已安裝 Go 並設定好資料庫 DSN
 go run main.go
+```
+
+#### 開發啟動 (自動重啟/Hot Reload) ⭐ **推薦**
+本專案已配置 `air` 工具，修改程式碼後後端會自動重啟：
+```powershell
+# 第一次使用需先確認 GOPATH/bin 在環境變數中，或直接執行：
+C:\Users\sky12\go\bin\air
 ```
 - **API 地址**: `http://localhost:8080`
 - **資料庫配置**: 位於 `db/connection.go`
 
-### 2. 前端 (React Vite)
+### 3. 啟動前端服務
 前端負責圖形化管理介面。
 
 ```bash

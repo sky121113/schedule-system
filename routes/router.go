@@ -76,6 +76,7 @@ func SetupRouter() *gin.Engine {
 
 			// 核心操作
 			monthly.POST("/:year/:month/generate", controllers.GenerateMonthlySchedule)
+			monthly.POST("/:year/:month/generate/v2", controllers.GenerateMonthlyScheduleV2)
 			monthly.GET("/:year/:month", controllers.GetMonthlySchedule)
 
 			// 月度預假

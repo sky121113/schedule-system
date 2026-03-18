@@ -3,7 +3,9 @@ package controllers
 import (
 	"math/rand"
 	"schedule-system/models"
+	"sort"
 )
+
 
 // requirementKey 用於快速查找特定星期與班別的人力需求
 type requirementKey struct {
@@ -139,6 +141,13 @@ func canAssignV6(
 		}
 	}
 
+	// R10: 大夜/小夜最多連續 4 天
+	if isNightShift(shiftType) {
+		if !checkNightEveningMaxConsecutive(empID, schedule, day, shiftType, totalDays, externalPrevDayShift) {
+			return false
+		}
+	}
+
 	// C7: 做 6 休 1 (雙向檢查) - 所有員工都適用（含 J）
 	{
 		backwardStreak := 0
@@ -150,6 +159,20 @@ func canAssignV6(
 				break
 			}
 		}
+
+		// 跨月份邊界檢查：若一直連到第一天，需加上上個月末尾的連續天數
+		if day == 0 && externalPrevDayShift != nil {
+			prev := externalPrevDayShift[empID]
+			if prev != "" && prev != "off" && prev != "pre_off" {
+				backwardStreak++
+			}
+		} else if day > 0 && backwardStreak == day && externalPrevDayShift != nil {
+			prev := externalPrevDayShift[empID]
+			if prev != "" && prev != "off" && prev != "pre_off" {
+				backwardStreak++
+			}
+		}
+
 		forwardStreak := 0
 		for d := day + 1; d < totalDays; d++ {
 			s := schedule[d][empID]
@@ -231,12 +254,117 @@ func canAssignV6Relaxed(
 	if s, ok := schedule[day][empID]; ok && (s == "pre_off" || (s != "" && s != "off")) {
 		return false
 	}
+
+	// R10: 大夜/小夜最多連續 4 天 — 寬鬆模式也必須遵守
+	if isNightShift(shiftType) {
+		if !checkNightEveningMaxConsecutive(empID, schedule, day, shiftType, totalDays, externalPrevDayShift) {
+			return false
+		}
+	}
+
+	// R6: 做 6 休 1 (雙向檢查) — 寬鬆模式也必須遵守此硬性約束
+	{
+		backwardStreak := 0
+		for d := day - 1; d >= 0; d-- {
+			s := schedule[d][empID]
+			if s != "" && s != "off" && s != "pre_off" {
+				backwardStreak++
+			} else {
+				break
+			}
+		}
+
+		// 跨月份邊界檢查
+		if day == 0 && externalPrevDayShift != nil {
+			prev := externalPrevDayShift[empID]
+			if prev != "" && prev != "off" && prev != "pre_off" {
+				backwardStreak++
+			}
+		} else if day > 0 && backwardStreak == day && externalPrevDayShift != nil {
+			prev := externalPrevDayShift[empID]
+			if prev != "" && prev != "off" && prev != "pre_off" {
+				backwardStreak++
+			}
+		}
+
+		forwardStreak := 0
+		for d := day + 1; d < totalDays; d++ {
+			s := schedule[d][empID]
+			if s != "" && s != "off" && s != "pre_off" {
+				forwardStreak++
+			} else {
+				break
+			}
+		}
+		if backwardStreak+1+forwardStreak > 6 {
+			return false
+		}
+	}
+
 	return true
 }
 
 // isNightShift 判斷是否為會產生休息時間衝突的夜間班別
 func isNightShift(st string) bool {
 	return st == "night" || st == "evening" || st == "night88"
+}
+
+// isNightFamily 判斷是否為大夜家族 (night / night88 視為同類)
+func isNightFamily(st string) bool {
+	return st == "night" || st == "night88"
+}
+
+// checkNightEveningMaxConsecutive 檢查大夜/小夜是否超過最大連續天數 (4 天)
+// night 和 night88 屬於同家族，互相視為連續
+func checkNightEveningMaxConsecutive(
+	empID uint,
+	schedule map[int]map[uint]string,
+	day int,
+	shiftType string,
+	totalDays int,
+	externalPrevDayShift map[uint]string,
+) bool {
+	const maxConsecutive = 4
+
+	// 判斷 s 是否與 shiftType 同家族
+	isSameFamily := func(s string) bool {
+		if isNightFamily(shiftType) {
+			return isNightFamily(s)
+		}
+		return s == shiftType // evening 只與 evening 同家族
+	}
+
+	// 往前數連續同家族天數
+	backward := 0
+	for d := day - 1; d >= 0; d-- {
+		if isSameFamily(schedule[d][empID]) {
+			backward++
+		} else {
+			break
+		}
+	}
+	// 跨月邊界
+	if day == 0 && externalPrevDayShift != nil {
+		if isSameFamily(externalPrevDayShift[empID]) {
+			backward++
+		}
+	} else if day > 0 && backward == day && externalPrevDayShift != nil {
+		if isSameFamily(externalPrevDayShift[empID]) {
+			backward++
+		}
+	}
+
+	// 往後數連續同家族天數
+	forward := 0
+	for d := day + 1; d < totalDays; d++ {
+		if isSameFamily(schedule[d][empID]) {
+			forward++
+		} else {
+			break
+		}
+	}
+
+	return backward+1+forward <= maxConsecutive
 }
 
 // findBestCandidateV3 尋找最適合排入特定日期的員工
@@ -342,6 +470,47 @@ func findBestCandidateV3(
 				}
 			}
 		}
+		// R10: 大夜/小夜最多連續 4 天 — 強制模式也不可違反
+		if isNightShift(shiftType) {
+			if !checkNightEveningMaxConsecutive(emp.ID, schedule, day, shiftType, totalDays, externalPrevDayShift) {
+				continue
+			}
+		}
+		// R6: 做 6 休 1 — 即便強制模式也不可違反
+		{
+			backwardStreak := 0
+			for d := day - 1; d >= 0; d-- {
+				s := schedule[d][emp.ID]
+				if s != "" && s != "off" && s != "pre_off" {
+					backwardStreak++
+				} else {
+					break
+				}
+			}
+			if day == 0 && externalPrevDayShift != nil {
+				prev := externalPrevDayShift[emp.ID]
+				if prev != "" && prev != "off" && prev != "pre_off" {
+					backwardStreak++
+				}
+			} else if day > 0 && backwardStreak == day && externalPrevDayShift != nil {
+				prev := externalPrevDayShift[emp.ID]
+				if prev != "" && prev != "off" && prev != "pre_off" {
+					backwardStreak++
+				}
+			}
+			forwardStreak := 0
+			for d := day + 1; d < totalDays; d++ {
+				s := schedule[d][emp.ID]
+				if s != "" && s != "off" && s != "pre_off" {
+					forwardStreak++
+				} else {
+					break
+				}
+			}
+			if backwardStreak+1+forwardStreak > 6 {
+				continue
+			}
+		}
 		forceEligible = append(forceEligible, emp.ID)
 	}
 	if len(forceEligible) > 0 {
@@ -377,15 +546,44 @@ func fillConsecutiveV3(
 	if len(eligible) == 0 {
 		return
 	}
-	rand.Shuffle(len(eligible), func(i, j int) { eligible[i], eligible[j] = eligible[j], eligible[i] })
 
+	// 1. 基於公平原則排序：本月工作量少的人優先參與夜選/小夜選 (人才庫輪替)
+	// 先計算每人工作量，用於排序
+	workCount := make(map[uint]int)
+	for _, id := range eligible {
+		w := 0
+		for st, count := range shiftCount[id] {
+			if st != "off" && st != "pre_off" && st != "" {
+				w += count
+			}
+		}
+		workCount[id] = w
+	}
+
+	// 先完全隨機打亂，消除原始陣列順序的影響
+	rand.Shuffle(len(eligible), func(i, j int) {
+		eligible[i], eligible[j] = eligible[j], eligible[i]
+	})
+
+	// 再按工作量穩定排序（工作量相同的人保持打亂後的隨機順序）
+	sort.SliceStable(eligible, func(i, j int) bool {
+		return workCount[eligible[i]] < workCount[eligible[j]]
+	})
+
+	// 2. 僅保留所需人數 (由排序後的頂部選取，確保公平性)
 	if len(eligible) > maxPeople {
 		eligible = eligible[:maxPeople]
 	}
 
-	for i, empID := range eligible {
+	// 3. 隨機打亂入選者的處理順序，避免固定順序產生的 pattern
+	rand.Shuffle(len(eligible), func(i, j int) {
+		eligible[i], eligible[j] = eligible[j], eligible[i]
+	})
+
+	for _, empID := range eligible {
 		blockCycle := runLen + restLen
-		offset := (i * 2) % blockCycle
+		// ⭐ 智慧多樣化：不再使用 (i*2)%block，改用隨機初始偏移量
+		offset := rand.Intn(blockCycle)
 		for d := offset; d < totalDays; {
 			canDoAll := true
 			actualRun := 0
@@ -433,8 +631,16 @@ func fillConsecutiveV3(
 }
 
 func pickLowestWork(ids []uint, shiftCount map[uint]map[string]int) uint {
+	if len(ids) == 0 {
+		return 0
+	}
+	// 先打亂候選人順序，確保同一水平的人選機會均等
+	rand.Shuffle(len(ids), func(i, j int) {
+		ids[i], ids[j] = ids[j], ids[i]
+	})
+
 	var best uint
-	minWork := 999
+	minWork := 9999
 	for _, id := range ids {
 		work := 0
 		for shiftType, c := range shiftCount[id] {

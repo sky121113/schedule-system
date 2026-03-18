@@ -2,15 +2,16 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Button, Card, Select, Space, Table, Tag, message, Modal,
   InputNumber, Form, Dropdown, Spin, Row, Col, Divider,
-  Drawer, List, Input, Popconfirm
+  Drawer, List, Input, Popconfirm, Tabs, Badge
 } from 'antd';
 import {
   LeftOutlined, RightOutlined, ThunderboltOutlined, EditOutlined,
-  HistoryOutlined, SaveOutlined, DeleteOutlined
+  HistoryOutlined, SaveOutlined, DeleteOutlined, InfoCircleOutlined,
+  BellOutlined
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import {
-  getMonthlySchedule, generateMonthlySchedule, updateMonthlySlot,
+  getMonthlySchedule, generateMonthlySchedule, generateMonthlyScheduleV2, updateMonthlySlot,
   getMonthlyLeaveSummary, getCycleBoundaries, getEmployees,
   getMonthlyPreLeaves, createMonthlyPreLeave, deleteMonthlyPreLeave,
   listMonthlyVersions, saveMonthlyVersion, restoreMonthlyVersion, deleteMonthlyVersion,
@@ -39,12 +40,14 @@ export default function MonthlySchedule() {
   // 初始假期設定彈窗
   const [initModalOpen, setInitModalOpen] = useState(false);
   const [initLeaveValues, setInitLeaveValues] = useState<Record<string, number>>({});
+  const [isV2Mode, setIsV2Mode] = useState(false);
 
   // 版本管理
   const [versionModalOpen, setVersionModalOpen] = useState(false);
   const [versionName, setVersionName] = useState('');
   const [versions, setVersions] = useState<MonthlyScheduleVersion[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // 載入班表
   const loadSchedule = useCallback(async () => {
@@ -96,7 +99,8 @@ export default function MonthlySchedule() {
   useEffect(() => { loadSchedule(); }, [loadSchedule]);
 
   // 產出班表
-  const handleGenerateClick = () => {
+  const handleGenerateClick = (v2: boolean = false) => {
+    setIsV2Mode(v2 === true);
     // 每次點擊都跳出確認窗，但先載入目前的餘額
     const defaults: Record<string, number> = {};
     for (const b of boundaries) {
@@ -118,11 +122,13 @@ export default function MonthlySchedule() {
   };
 
   const doGenerate = async (
-    cycleBalances: { cycle_index: number; employee_id: number; total_leave: number }[]
+    cycleBalances: { cycle_index: number; employee_id: number; total_leave: number }[],
+    v2: boolean = false
   ) => {
     setGenerating(true);
     try {
-      const res = await generateMonthlySchedule(year, month, cycleBalances);
+      const apiCall = v2 ? generateMonthlyScheduleV2 : generateMonthlySchedule;
+      const res = await apiCall(year, month, cycleBalances);
       setSlots(res.data.slots);
       setWarnings(res.data.warnings || []);
       setHasSchedule(true);
@@ -149,7 +155,7 @@ export default function MonthlySchedule() {
       balances.push({ cycle_index: ci, employee_id: eid, total_leave: initLeaveValues[key] });
     }
     setInitModalOpen(false);
-    await doGenerate(balances);
+    await doGenerate(balances, isV2Mode);
   };
 
   // 載入版本清單
@@ -290,6 +296,7 @@ export default function MonthlySchedule() {
     { key: 'day88', label: '🌅 8-8 白班' },
     { key: 'evening', label: '🌙 小夜班' },
     { key: 'night', label: '🌑 大夜班' },
+    { key: 'night88', label: '🌑 8-8 大夜' },
     { key: 'off', label: '🟢 休假' },
   ];
 
@@ -323,14 +330,14 @@ export default function MonthlySchedule() {
       });
 
       const dailyReqs = staffingRequirements.filter(r => r.weekday === weekday);
-      
+
       // 輔助函式：取得指定班別的需求量
       const getRequirementValue = (st: string) => {
         const r = dailyReqs.find(rr => rr.shift_type === st);
         return r ? (hasDay88 ? r.min_count_with_day88 : r.min_count) : 0;
       };
 
-      const shortageAnywhere = 
+      const shortageAnywhere =
         counts.day < getRequirementValue('day') ||
         counts.evening < getRequirementValue('evening') ||
         counts.night < getRequirementValue('night');
@@ -341,8 +348,8 @@ export default function MonthlySchedule() {
             <div style={{ fontSize: 12, color: shortageAnywhere ? '#ff4d4f' : (isWeekend ? '#ff4d4f' : '#666') }}>
               {weekdayNames[weekday]}
             </div>
-            <div style={{ 
-              fontWeight: 600, 
+            <div style={{
+              fontWeight: 600,
               color: shortageAnywhere ? '#ff4d4f' : 'inherit',
               textDecoration: shortageAnywhere ? 'underline' : 'none'
             }}>
@@ -364,6 +371,7 @@ export default function MonthlySchedule() {
           style: {
             borderRight: isBoundary ? '3px solid #ff4d4f' : undefined,
             padding: 2,
+            background: isWeekend ? '#fff1f0' : undefined,
           },
         }),
         render: (_: unknown, record: { empId: number }) => {
@@ -448,6 +456,17 @@ export default function MonthlySchedule() {
         },
       };
     }),
+    {
+      title: '總休',
+      key: 'total_off',
+      fixed: 'right' as const,
+      width: 50,
+      align: 'center' as const,
+      render: (_: unknown, record: { empId: number }) => {
+        const mySlots = (slots || []).filter(s => s.employee_id === record.empId && s.shift_type === 'off');
+        return <strong style={{ color: '#52c41a' }}>{mySlots.length}</strong>;
+      }
+    }
   ];
 
   // 表格資料
@@ -479,28 +498,46 @@ export default function MonthlySchedule() {
           options={Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1} 月` }))}
         />
         <Button icon={<RightOutlined />} onClick={() => changeMonth(1)} />
-        <Button
+        <Dropdown.Button
           type="primary"
           icon={<ThunderboltOutlined />}
           loading={generating}
-          onClick={handleGenerateClick}
+          onClick={() => doGenerate([])}
+          menu={{
+            items: [
+              {
+                key: 'set_quota',
+                label: '設定配額並產出',
+                icon: <EditOutlined />,
+                onClick: () => handleGenerateClick(false)
+              }
+            ]
+          }}
         >
-          {hasSchedule ? '確認配額並重新產出' : '設定配額並產出班表'}
-        </Button>
+          {hasSchedule ? '快速重新產出' : '立即自動排班'}
+        </Dropdown.Button>
         {hasSchedule && (
           <Space>
-            <Button 
-              icon={<SaveOutlined />} 
+            <Button
+              icon={<SaveOutlined />}
               onClick={() => setVersionModalOpen(true)}
             >
               儲存版本
             </Button>
-            <Button 
-              icon={<HistoryOutlined />} 
+            <Button
+              icon={<HistoryOutlined />}
               onClick={() => setHistoryOpen(true)}
             >
               版本紀錄 ({versions.length})
             </Button>
+            <Badge count={(warnings || []).length} offset={[-2, 0]}>
+              <Button
+                icon={<BellOutlined />}
+                onClick={() => setDrawerOpen(true)}
+              >
+                班表資訊
+              </Button>
+            </Badge>
           </Space>
         )}
       </Space>
@@ -523,18 +560,67 @@ export default function MonthlySchedule() {
         </div>
       )}
 
-      {/* 警示訊息區 */}
-      {(warnings || []).length > 0 && (
-        <Card
-          size="small"
-          title={<Space><span style={{ color: '#faad14' }}>⚠️ 班表人力警示 (共 {(warnings || []).length} 處)</span></Space>}
-          style={{ marginBottom: 24, border: '1px solid #ffe58f', background: '#fffbe6' }}
-        >
-          <ul style={{ margin: 0, paddingLeft: 20, color: '#856404', fontSize: 13 }}>
-            {(warnings || []).map((w, i) => <li key={i}>{w}</li>)}
-          </ul>
-        </Card>
-      )}
+      {/* 資訊中心 Drawer */}
+      <Drawer
+        title={<Space><BellOutlined /><span>班表資訊中心</span></Space>}
+        placement="right"
+        onClose={() => setDrawerOpen(false)}
+        open={drawerOpen}
+        width={450}
+      >
+        <Tabs
+          defaultActiveKey="warnings"
+          items={[
+            {
+              key: 'warnings',
+              label: (
+                <Badge count={(warnings || []).length} offset={[12, -2]} size="small">
+                  <span>人力警示</span>
+                </Badge>
+              ),
+              children: (
+                <List
+                  dataSource={warnings || []}
+                  locale={{ emptyText: '暫無人力警示' }}
+                  renderItem={(item, index) => (
+                    <List.Item key={index}>
+                      <div style={{ color: '#856404', fontSize: 13 }}>
+                        <InfoCircleOutlined style={{ marginRight: 8, color: '#faad14' }} />
+                        {item}
+                      </div>
+                    </List.Item>
+                  )}
+                />
+              )
+            },
+            {
+              key: 'restrictions',
+              label: '員工班別限制',
+              children: (
+                <List
+                  dataSource={employees.filter(e => e.status === 1 && e.restrictions && e.restrictions.length > 0)}
+                  locale={{ emptyText: '所有員工皆無特殊限制' }}
+                  renderItem={emp => (
+                    <List.Item key={emp.ID}>
+                      <div style={{ width: '100%' }}>
+                        <div style={{ fontWeight: 'bold', marginBottom: 8 }}>{emp.name}</div>
+                        <Space wrap>
+                          {emp.restrictions?.map(r => (
+                            <Tag key={r.ID} color={r.max_days === null ? 'red' : 'blue'}>
+                              {SHIFT_CONFIG[r.shift_type as ShiftType]?.label || r.shift_type}: 
+                              {r.max_days === null ? ' 禁止' : ` ≤${r.max_days}天`}
+                            </Tag>
+                          ))}
+                        </Space>
+                      </div>
+                    </List.Item>
+                  )}
+                />
+              )
+            }
+          ]}
+        />
+      </Drawer>
 
       {/* 班表 */}
       <Spin spinning={loading}>
@@ -545,7 +631,7 @@ export default function MonthlySchedule() {
             pagination={false}
             size="small"
             bordered
-            scroll={{ x: 80 + daysInMonth * 50 }}
+            scroll={{ x: 80 + daysInMonth * 50 + 50 }}
             style={{ marginBottom: 16 }}
             summary={() => (
               <Table.Summary fixed>
@@ -554,14 +640,17 @@ export default function MonthlySchedule() {
                   return (
                     <Table.Summary.Row key={shiftType} style={{ background: '#fafafa' }}>
                       <Table.Summary.Cell index={0} align="right">
-                        <strong>{emoji}</strong>
+                        <div style={{ fontSize: 12, fontWeight: 'bold' }}>
+                          {emoji} {shiftType === 'day' ? '白班' : shiftType === 'evening' ? '小夜' : '大夜'}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>(應/實)</div>
                       </Table.Summary.Cell>
                       {dates.map((day, dIdx) => {
                         const dateObj = new Date(year, month - 1, day);
                         const weekday = dateObj.getDay();
                         const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                         const daySlots = (slots || []).filter(s => s.date.startsWith(dateStr));
-                        
+
                         let actual = 0;
                         let hasDay88 = false;
                         daySlots.forEach(s => {
@@ -577,33 +666,42 @@ export default function MonthlySchedule() {
                         const isBoundary = boundaryDates.has(day);
 
                         return (
-                          <Table.Summary.Cell 
-                            key={dIdx} 
+                          <Table.Summary.Cell
+                            key={dIdx}
                             index={dIdx + 1}
                           >
-                            <div style={{ 
-                              textAlign: 'center', 
+                            <div style={{
+                              textAlign: 'center',
                               color: isLess ? '#ff4d4f' : '#8c8c8c',
                               background: isLess ? '#fff1f0' : 'transparent',
                               borderRight: isBoundary ? '3px solid #ff4d4f' : undefined,
                               fontSize: 11,
                               padding: '4px 0',
-                              margin: '-16px -8px', 
+                              margin: '-16px -8px',
                               height: '100%',
                               display: 'flex',
                               flexDirection: 'column',
                               justifyContent: 'center'
                             }}>
-                              <div style={{ fontWeight: isLess ? 'bold' : 'normal' }}>
-                                {actual}
-                              </div>
-                              <div style={{ fontSize: 9, opacity: 0.7, borderTop: '1px solid #eee' }}>
+                              <div style={{ fontWeight: isLess ? 'bold' : 'normal', opacity: 0.8 }}>
                                 {needed}
+                              </div>
+                              <div style={{
+                                fontSize: 10,
+                                fontWeight: isLess ? 'bold' : 'normal',
+                                borderTop: '1px solid #eee',
+                                marginTop: 2,
+                                paddingTop: 2
+                              }}>
+                                {actual}
                               </div>
                             </div>
                           </Table.Summary.Cell>
                         );
                       })}
+                      <Table.Summary.Cell index={dates.length + 1}>
+                        {/* 總休列對應的空白格 */}
+                      </Table.Summary.Cell>
                     </Table.Summary.Row>
                   );
                 })}
@@ -614,7 +712,7 @@ export default function MonthlySchedule() {
           <Card style={{ textAlign: 'center', padding: 40 }}>
             <EditOutlined style={{ fontSize: 48, color: '#bfbfbf' }} />
             <p style={{ color: '#999', marginTop: 16 }}>尚未建立 {year}/{month} 月度班表</p>
-            <Button type="primary" onClick={handleGenerateClick}>
+            <Button type="primary" onClick={() => handleGenerateClick(false)}>
               立即產出
             </Button>
           </Card>
@@ -625,116 +723,110 @@ export default function MonthlySchedule() {
       {hasSchedule && cycleLeaveStats.length > 0 && (
         <>
           <Divider>各循環假期使用詳情 (逐人)</Divider>
-          {cycleLeaveStats.map((stat, i) => (
-            <Card
-              key={i}
-              title={
+          <Tabs
+            type="card"
+            items={cycleLeaveStats.map((stat, i) => ({
+              key: String(stat.cycle_index),
+              label: (
                 <Space>
                   <Tag color={i === 0 ? 'blue' : 'green'}>C{stat.cycle_index}</Tag>
-                  <span>循環區間：{stat.start_date} ~ {stat.end_date}</span>
-                  <span style={{ fontSize: 12, fontWeight: 'normal', color: '#8c8c8c' }}>
-                    (本月佔 {stat.days_in_month} 天)
-                  </span>
+                  <span>{stat.start_date} ~ {stat.end_date}</span>
                 </Space>
-              }
-              size="small"
-              style={{ marginBottom: 24 }}
-              styles={{ body: { padding: 0 } }}
-            >
-              <Table
-                dataSource={stat.details}
-                pagination={false}
-                size="small"
-                rowKey="employee_id"
-                columns={[
-                  {
-                    title: '員工姓名',
-                    dataIndex: 'employee_name',
-                    key: 'name',
-                    width: 120,
-                    render: (text) => <strong>{text}</strong>
-                  },
-                  {
-                    title: '循環原始總假',
-                    dataIndex: 'total_leave',
-                    key: 'total',
-                    align: 'center',
-                    width: 110,
-                    render: (val) => {
-                      return `${val} 天`;
-                    }
-                  },
-                  {
-                    title: '本月應休（目標）',
-                    key: 'monthly_quota',
-                    align: 'center',
-                    width: 130,
-                    render: (_, record) => {
-                      const isEndingThisMonth = record.cycle_index === 1; // 假設 C1 都是結束於本月
-                      const label = isEndingThisMonth ? '(手動輸入額度)' : '(系統比例分配)';
-                      return (
-                        <div>
-                          <strong>{record.current_month_quota} 天</strong>
-                          <div style={{ fontSize: 10, color: '#8c8c8c' }}>{label}</div>
-                        </div>
-                      );
-                    }
-                  },
-                  {
-                    title: '本月已排 (休)',
-                    key: 'month_used',
-                    align: 'center',
-                    width: 110,
-                    render: (_, record) => {
-                      const mySlots = (slots || []).filter(s =>
-                        s.employee_id === record.employee_id &&
-                        s.cycle_index === stat.cycle_index &&
-                        s.shift_type === 'off'
-                      );
-                      return <Tag color="orange">{mySlots.length} 天</Tag>;
-                    }
-                  },
-                  {
-                    title: '循環累計已用',
-                    dataIndex: 'used_leave',
-                    key: 'used',
-                    align: 'center',
-                    render: (val) => `${val} 天`
-                  },
-                  {
-                    title: '最終剩餘',
-                    key: 'final_remaining',
-                    align: 'center',
-                    width: 100,
-                    render: (_: any, record: any) => {
-                      const mySlots = (slots || []).filter(s =>
-                        s.employee_id === record.employee_id &&
-                        s.cycle_index === stat.cycle_index &&
-                        s.shift_type === 'off'
-                      );
-                      const monthUsed = mySlots.length;
-                      // 如果是這個月就結束的循環 (C1)，剩餘會歸 0。其他的循環則是 (總 - 以前用的 - 本月用的)
-                      // 我們這裡簡化顯示：
-                      // current_month_quota 是這個月分配到的額度。如果是 C1，這個月用完就沒了。如果是 C2，還可給下個月用。
-                      // 但使用者最直覺的理解是「整個循環到底還剩多少假沒休完」。
-                      // 所以：
-                      const isEndingThisMonth = record.cycle_index === 1;
-                      let res = 0;
-                      if (isEndingThisMonth) {
-                        res = record.current_month_quota - monthUsed; // 手動指定的應休量 - 實際已休量
-                      } else {
-                        // remaining 是本月初結算時剩下的。減去這個月排的，就是結算到這月結束時的全循環剩餘額度
-                        res = record.current_month_quota - monthUsed + (record.remaining - record.current_month_quota);
-                      }
+              ),
+              children: (
+                <div style={{ padding: '8px 0' }}>
+                  <Table
+                    dataSource={stat.details}
+                    pagination={false}
+                    size="small"
+                    rowKey="employee_id"
+                    bordered
+                    columns={[
+                      {
+                        title: '員工姓名',
+                        dataIndex: 'employee_name',
+                        key: 'name',
+                        width: 120,
+                        fixed: 'left',
+                        render: (text) => <strong>{text}</strong>
+                      },
+                      {
+                        title: '循環原始總假',
+                        dataIndex: 'total_leave',
+                        key: 'total',
+                        align: 'center',
+                        width: 110,
+                        render: (val) => `${val} 天`
+                      },
+                      {
+                        title: '循環累計已用',
+                        dataIndex: 'used_leave',
+                        key: 'used',
+                        align: 'center',
+                        width: 110,
+                        render: (val) => `${val} 天`
+                      },
+                      {
+                        title: '本月應休 (目標)',
+                        key: 'monthly_quota',
+                        align: 'center',
+                        width: 130,
+                        render: (_, record: any) => {
+                          const isEnding = record.is_ending;
+                          const label = isEnding ? (record.month_quota_manually_set ? '(手動輸入額度)' : '(循環結算剩餘)') : '(系統比例分配)';
+                          return (
+                            <div>
+                              <strong>{record.current_month_quota} 天</strong>
+                              <div style={{ fontSize: 10, color: '#8c8c8c' }}>{label}</div>
+                            </div>
+                          );
+                        }
+                      },
+                      {
+                        title: '本月已排 (休)',
+                        key: 'month_used',
+                        align: 'center',
+                        width: 110,
+                        render: (_, record) => {
+                          const mySlots = (slots || []).filter(s =>
+                            s.employee_id === record.employee_id &&
+                            s.cycle_index === stat.cycle_index &&
+                            s.shift_type === 'off'
+                          );
+                          return <Tag color="orange">{mySlots.length} 天</Tag>;
+                        }
+                      },
+                      {
+                        title: '最終剩餘',
+                        key: 'final_remaining',
+                        align: 'center',
+                        width: 100,
+                        render: (_: any, record: any) => {
+                          const mySlots = (slots || []).filter(s =>
+                            s.employee_id === record.employee_id &&
+                            s.cycle_index === stat.cycle_index &&
+                            s.shift_type === 'off'
+                          );
+                          const monthUsed = mySlots.length;
+                          // C1 特別邏輯：本月應休 - 本月已排 (因為 C1 是系統啟始，前半部假已用掉，使用者手動 key 剩餘配額)
+                          // 其他循環：總假 - 累計已用(包含本月前) - 本月已排
+                          let res = 0;
+                          if (stat.cycle_index === 1) {
+                            res = record.current_month_quota - monthUsed;
+                          } else {
+                            res = record.total_leave - record.used_leave - monthUsed;
+                          }
 
-                      const color = res < 0 ? 'red' : (res === 0 ? 'blue' : 'green');
-                      return <Tag color={color} style={{ fontWeight: 'bold' }}>{res} 天</Tag>;
-                    }
-                  },
-                ]}
-              />
-            </Card>
-          ))}
+                          const color = res < 0 ? 'red' : (res === 0 ? 'blue' : 'green');
+                          return <Tag color={color} style={{ fontWeight: 'bold' }}>{res} 天</Tag>;
+                        }
+                      },
+                    ]}
+                  />
+                </div>
+              )
+            }))}
+          />
         </>
       )}
 
@@ -750,8 +842,8 @@ export default function MonthlySchedule() {
       >
         <p style={{ color: '#666', marginBottom: 16 }}>
           請確認每位員工在該循環「可排休假總天數」。<br />
-          <span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>※ C1 為本月結束之循環，請「直接輸入在 4 月份還剩下幾天假」即可。(系統原始總假不受影響)</span><br />
-          <span style={{ color: '#52c41a', fontWeight: 'bold' }}>※ 其餘循環由系統自動結算原始總假，並依本月天數比例進行發假，無法手動更改。</span>
+          <span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>※ 此循環在本月結束，請「直接輸入在本月剩餘應休天數」即可。</span><br />
+          <span style={{ color: '#52c41a', fontWeight: 'bold' }}>※ 其餘循環由系統依比例分配或下月結算，此處暫不供調整。</span>
         </p>
         <Form layout="vertical">
           {boundaries.map((b) => (
@@ -767,7 +859,7 @@ export default function MonthlySchedule() {
                     return (
                       <Col key={key} span={8}>
                         <Form.Item label={emp.name} style={{ marginBottom: 8 }}>
-                          {b.cycle_index === 1 ? (
+                          {b.is_ending ? (
                             <InputNumber
                               min={0}
                               max={28}
@@ -807,10 +899,10 @@ export default function MonthlySchedule() {
         cancelText="取消"
       >
         <p>請輸入一個好辨識的名稱（例如：初稿、修訂 V1、最終確認版）</p>
-        <Input 
-          placeholder="版本名稱" 
-          value={versionName} 
-          onChange={(e) => setVersionName(e.target.value)} 
+        <Input
+          placeholder="版本名稱"
+          value={versionName}
+          onChange={(e) => setVersionName(e.target.value)}
           onPressEnter={handleSaveVersion}
         />
       </Modal>
@@ -829,8 +921,8 @@ export default function MonthlySchedule() {
             <List.Item
               actions={[
                 <Button type="link" onClick={() => handleRestoreVersion(item.ID)}>載入</Button>,
-                <Popconfirm 
-                  title="確定要刪除此版本嗎？" 
+                <Popconfirm
+                  title="確定要刪除此版本嗎？"
                   onConfirm={() => handleDeleteVersion(item.ID)}
                   okText="確定"
                   cancelText="取消"

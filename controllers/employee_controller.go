@@ -9,18 +9,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// GetEmployees 取得所有員工
+// GetEmployees 取得所有員工 (含限制)
 func GetEmployees(c *gin.Context) {
 	var employees []models.Employee
-	db.DB.Find(&employees)
+	db.DB.Preload("Restrictions").Find(&employees)
 	c.JSON(http.StatusOK, employees)
 }
 
-// GetEmployee 取得單一員工
+// GetEmployee 取得單一員工 (含限制)
 func GetEmployee(c *gin.Context) {
 	id := c.Param("id")
 	var employee models.Employee
-	if err := db.DB.First(&employee, id).Error; err != nil {
+	if err := db.DB.Preload("Restrictions").First(&employee, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "員工不存在"})
 		return
 	}
@@ -207,7 +207,7 @@ func ValidateRestrictions(c *gin.Context) {
 		}
 
 		if availableCount < maxRequired {
-			warnings = append(warnings, st+"班可用人數("+strconv.Itoa(availableCount)+")不足最大需求("+strconv.Itoa(maxRequired)+")")
+			warnings = append(warnings, translateShiftV1(st)+"班可用人數("+strconv.Itoa(availableCount)+")不足最大需求("+strconv.Itoa(maxRequired)+")")
 		}
 	}
 

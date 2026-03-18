@@ -48,6 +48,25 @@ const EmployeeManagement = () => {
       },
     },
     {
+      title: '班別限制',
+      key: 'restrictions',
+      render: (_: unknown, record: Employee) => {
+        if (!record.restrictions || record.restrictions.length === 0) {
+          return <span style={{ color: '#ccc' }}>無限制</span>;
+        }
+        return (
+          <Space size={[0, 4]} wrap>
+            {record.restrictions.map((r) => (
+              <Tag key={r.ID} color={r.max_days === null ? 'red' : 'blue'} style={{ marginBottom: 4 }}>
+                {SHIFT_CONFIG[r.shift_type]?.label || r.shift_type}: 
+                {r.max_days === null ? ' 禁' : ` ≤${r.max_days}天`}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
       title: '操作',
       key: 'action',
       width: 200,
@@ -122,6 +141,7 @@ const EmployeeManagement = () => {
       // 重新載入
       const res = await api.getEmployeeRestrictions(selectedEmployee!.ID);
       setRestrictions(res.data);
+      fetchEmployees(); // 同步更新主表格
     } catch {
       message.error('新增失敗');
     }
@@ -133,6 +153,7 @@ const EmployeeManagement = () => {
     message.success('已刪除');
     const res = await api.getEmployeeRestrictions(selectedEmployee!.ID);
     setRestrictions(res.data);
+    fetchEmployees(); // 同步更新主表格
   };
 
   return (

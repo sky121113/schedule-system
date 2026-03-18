@@ -110,6 +110,7 @@ export interface CycleBoundary {
   days_in_month: number;
   total_days: number;
   default_total_leave: number;
+  is_ending: boolean;
 }
 
 export interface MonthlyScheduleResponse {
@@ -139,6 +140,12 @@ export const generateMonthlySchedule = (
   month: number,
   cycleBalances?: { cycle_index: number; employee_id: number; total_leave: number }[]
 ) => api.post(`/monthly/${year}/${month}/generate`, { cycle_balances: cycleBalances || [] });
+
+export const generateMonthlyScheduleV2 = (
+  year: number,
+  month: number,
+  cycleBalances?: { cycle_index: number; employee_id: number; total_leave: number }[]
+) => api.post(`/monthly/${year}/${month}/generate/v2`, { cycle_balances: cycleBalances || [] });
 
 export const getMonthlyLeaveSummary = (year: number, month: number) =>
   api.get<{ boundaries: CycleBoundary[]; summaries: LeaveSummaryItem[] }>(`/monthly/${year}/${month}/leave-summary`);

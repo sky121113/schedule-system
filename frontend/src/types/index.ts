@@ -7,6 +7,7 @@ export interface Employee {
   email: string;
   is_day88_primary: boolean;
   status: number; // 1=在職, 0=停用, 2=長期請假
+  restrictions?: ShiftRestriction[];
 }
 
 // 班別限制

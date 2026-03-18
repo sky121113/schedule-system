@@ -112,7 +112,6 @@ func GetMonthlySchedule(c *gin.Context) {
 	})
 }
 
-// CycleBoundary 循環分界資訊
 type CycleBoundary struct {
 	CycleIndex        int    `json:"cycle_index"`
 	StartDate         string `json:"start_date"`          // 該循環在本月內的起始日
@@ -120,6 +119,7 @@ type CycleBoundary struct {
 	DaysInMonth       int    `json:"days_in_month"`       // 該循環在本月佔幾天
 	TotalDays         int    `json:"total_days"`          // 該循環總天數 (28)
 	DefaultTotalLeave int    `json:"default_total_leave"` // 該循環的預設總假日
+	IsEnding          bool   `json:"is_ending"`           // 該循環是否在本月結束
 }
 
 // calcCycleBoundaries 計算一個月涉及的循環及其分界
@@ -136,9 +136,12 @@ func calcCycleBoundaries(firstDay, lastDay time.Time) []CycleBoundary {
 			cycleIndex--
 		}
 
-		// 計算這個循環在本月的結束日
-		remainingInCycle := 27 - dayOffset // 此循環剩餘天數
-		cycleEndInMonth := current.AddDate(0, 0, remainingInCycle)
+		// 計算這個循環的絕對結束日
+		remainingInCycle := 27 - dayOffset
+		absoluteCycleEndDate := current.AddDate(0, 0, remainingInCycle)
+
+		// 在本月內的結束日
+		cycleEndInMonth := absoluteCycleEndDate
 		if cycleEndInMonth.After(lastDay) {
 			cycleEndInMonth = lastDay
 		}
@@ -152,6 +155,7 @@ func calcCycleBoundaries(firstDay, lastDay time.Time) []CycleBoundary {
 			DaysInMonth:       daysInMonth,
 			TotalDays:         28,
 			DefaultTotalLeave: taiwanHolidays2026[cycleIndex],
+			IsEnding:          !absoluteCycleEndDate.After(lastDay),
 		})
 
 		current = cycleEndInMonth.AddDate(0, 0, 1)
@@ -162,6 +166,7 @@ func calcCycleBoundaries(firstDay, lastDay time.Time) []CycleBoundary {
 
 // GenerateMonthlySchedule 產出月度班表 (核心)
 func GenerateMonthlySchedule(c *gin.Context) {
+	rand.Seed(time.Now().UnixNano()) // 注入隨機種子，確保每次生成結果不同
 	year, _ := strconv.Atoi(c.Param("year"))
 	month, _ := strconv.Atoi(c.Param("month"))
 
@@ -278,19 +283,26 @@ func GenerateMonthlySchedule(c *gin.Context) {
 				db.DB.Create(&balance)
 			}
 
+			// 查詢目前「在本月之前」該循環已休天數 (確保計算精準，不依賴可能過時的 balance.UsedLeave)
+			var usedBeforeThisMonth int64
+			db.DB.Model(&models.MonthlySlot{}).
+				Where("cycle_index = ? AND employee_id = ? AND shift_type = 'off' AND date < ?", b.CycleIndex, emp.ID, firstDay).
+				Count(&usedBeforeThisMonth)
+
+			actualUsedBefore := int(usedBeforeThisMonth) + balance.OfflineUsed
+
 			// 使用 MonthQuota（使用者手動指定）或按比例分配
 			thisMonthLeave := 0
 			if balance.MonthQuota >= 0 {
 				// 使用者有手動設定本月應休天數（例如 C1）
 				thisMonthLeave = balance.MonthQuota
 			} else {
-				// 系統按比例分配：直接用 TotalLeave * ratio，每個循環的假期是獨立的
 				cycleEndDate := cycleStartDate.AddDate(0, 0, (b.CycleIndex*28)-1)
 				if !cycleEndDate.After(lastDay) {
-					// 循環在本月結束，剩下的假期全部要在本月排完
-					thisMonthLeave = balance.TotalLeave - balance.UsedLeave
+					// 循環在本月結束，剩下的假期全部要在本月排完 (剩餘分配)
+					thisMonthLeave = balance.TotalLeave - actualUsedBefore
 				} else {
-					// 循環跨到下個月，按本月佔比分配
+					// 循環跨到下個月，按本月佔比分配 (比例分配)
 					thisMonthLeave = int(math.Round(float64(balance.TotalLeave) * ratio))
 				}
 			}
@@ -440,6 +452,11 @@ func runMonthlySchedule(
 
 	log.Printf("[Monthly] runMonthlySchedule 開始: %d 天, %d 名員工, 預假數: %d", totalDays, len(employees), len(monthlyPreLeaves))
 
+	// 基於公平原則，深層打亂員工名單，避免排班優待特定人員
+	rand.Shuffle(len(employees), func(i, j int) {
+		employees[i], employees[j] = employees[j], employees[i]
+	})
+
 	// schedule[day][empID] = shiftType
 	schedule := make(map[int]map[uint]string)
 	shiftCount := make(map[uint]map[string]int)
@@ -499,17 +516,18 @@ func runMonthlySchedule(
 		}
 	}
 
-	// ─── 步驟 1：分配其餘假期（Round-Robin 輪流分配）⭐ ───
-	log.Println("[Monthly] 步驟 1: 分配假期 (Round-Robin)")
+	// ─── 步驟 1：分配其餘假期（智慧型輪流分配）⭐ ───
+	log.Println("[Monthly] 步驟 1: 分配假期 (智慧整合版)")
 	dayOffset := 0
 	for qi, q := range quotas {
 		boundary := boundaries[qi]
 		segmentDays := boundary.DaysInMonth
 
-		// 計算按需求排序的日期清單（低需求優先放假）
+		// 1. 計算按需求排序的日期清單（優先權：低人力需求 > 已排假人數少）
 		type dayNeed struct {
-			day  int
-			need int
+			day      int
+			need     int
+			offCount int
 		}
 		var dayNeeds []dayNeed
 		for d := dayOffset; d < dayOffset+segmentDays; d++ {
@@ -521,13 +539,10 @@ func runMonthlySchedule(
 					totalNeed += req.MinCountWithDay88
 				}
 			}
-			dayNeeds = append(dayNeeds, dayNeed{d, totalNeed})
+			dayNeeds = append(dayNeeds, dayNeed{d, totalNeed, 0})
 		}
-		sort.Slice(dayNeeds, func(i, j int) bool {
-			return dayNeeds[i].need < dayNeeds[j].need
-		})
 
-		// 計算每人的剩餘假期配額
+		// 2. 計算每人的剩餘假期配額
 		remaining := make(map[uint]int)
 		for _, emp := range employees {
 			segmentPreLeaveCount := 0
@@ -542,65 +557,119 @@ func runMonthlySchedule(
 			}
 		}
 
-		// Round-Robin：每輪每人挑 1 天假，直到所有人配額用完
+		// 3. 智慧分配：Round-Robin 每輪每人挑 1 天假
 		for {
 			anyAssigned := false
-
-			// 隨機打亂員工順序，避免排序靠前的 A、B 永遠優先選到低需求日
 			shuffledEmployees := make([]models.Employee, len(employees))
 			copy(shuffledEmployees, employees)
 			rand.Shuffle(len(shuffledEmployees), func(i, j int) {
 				shuffledEmployees[i], shuffledEmployees[j] = shuffledEmployees[j], shuffledEmployees[i]
 			})
 
+			// 更新每一天的已排假人數，用於智慧排序
+			for i := range dayNeeds {
+				count := 0
+				for _, emp := range employees {
+					if schedule[dayNeeds[i].day][emp.ID] == "off" || schedule[dayNeeds[i].day][emp.ID] == "pre_off" {
+						count++
+					}
+				}
+				dayNeeds[i].offCount = count
+			}
+
+			// 排序日期：總需求越低越優先，若需求相同，則已休假人數越少越優先
+			sort.Slice(dayNeeds, func(i, j int) bool {
+				if dayNeeds[i].need != dayNeeds[j].need {
+					return dayNeeds[i].need < dayNeeds[j].need
+				}
+				return dayNeeds[i].offCount < dayNeeds[j].offCount
+			})
+
 			for _, emp := range shuffledEmployees {
 				if remaining[emp.ID] <= 0 {
 					continue
 				}
-				// 從低需求日開始，找一個可以放假的天
+
+				// 計算該員工在每一天的「急迫性評分」(Continuity Score)
+				// 如果今天不休假就會連續上班超過 6 天，急迫性最高
 				assigned := false
 				for _, dn := range dayNeeds {
 					if schedule[dn.day][emp.ID] != "" {
 						continue
 					}
-					// 避免連續兩天假
-					if dn.day > 0 && schedule[dn.day-1][emp.ID] == "off" {
-						continue
-					}
-					if dn.day+1 < dayOffset+segmentDays && schedule[dn.day+1][emp.ID] == "off" {
-						continue
-					}
-					// 人力需求保護
-					offCount := 0
-					for _, otherEmp := range employees {
-						if schedule[dn.day][otherEmp.ID] == "off" || schedule[dn.day][otherEmp.ID] == "pre_off" {
-							offCount++
+
+					// 主動式 R6 檢查：
+					// 往前看
+					backwardStreak := 0
+					for d := dn.day - 1; d >= 0; d-- {
+						s := schedule[d][emp.ID]
+						if s != "" && s != "off" && s != "pre_off" {
+							backwardStreak++
+						} else {
+							break
 						}
 					}
-					activeCount := len(employees) - (offCount + 1)
+					// 跨月份邊界檢查
+					if dn.day == 0 && prevDaySchedule != nil {
+						prev := prevDaySchedule[emp.ID]
+						if prev != "" && prev != "off" && prev != "pre_off" {
+							backwardStreak++
+						}
+					} else if dn.day > 0 && backwardStreak == dn.day && prevDaySchedule != nil {
+						prev := prevDaySchedule[emp.ID]
+						if prev != "" && prev != "off" && prev != "pre_off" {
+							backwardStreak++
+						}
+					}
+					// 往後看（若已排定後面的班）
+					forwardStreak := 0
+					for d := dn.day + 1; d < totalDays; d++ {
+						s := schedule[d][emp.ID]
+						if s != "" && s != "off" && s != "pre_off" {
+							forwardStreak++
+						} else {
+							break
+						}
+					}
+
+					// 如果這天休假可以「切斷」一個即將過長的連班，優先度極高
+					isUrgent := backwardStreak >= 4 || (backwardStreak+forwardStreak) >= 5
+
+					// 避免連續兩天假 (除非這天非常緊急或是已經沒別的可選了)
+					isAdjacentOff := false
+					if dn.day > 0 && (schedule[dn.day-1][emp.ID] == "off" || schedule[dn.day-1][emp.ID] == "pre_off") {
+						isAdjacentOff = true
+					}
+					if dn.day+1 < totalDays && (schedule[dn.day+1][emp.ID] == "off" || schedule[dn.day+1][emp.ID] == "pre_off") {
+						isAdjacentOff = true
+					}
+
+					if isAdjacentOff && !isUrgent {
+						continue
+					}
+
+					// 人力需求保護
+					activeCount := len(employees) - (dn.offCount + 1)
 					if activeCount < dn.need {
 						continue
 					}
+
+					// 執行分配
 					schedule[dn.day][emp.ID] = "off"
 					shiftCount[emp.ID]["off"]++
 					remaining[emp.ID]--
 					assigned = true
 					anyAssigned = true
-					break // 本輪只挑 1 天
+					break
 				}
-				// 降級：取消間隔限制
+
+				// 降級路徑：如果挑不到好位子但也還有配額，則放寬限制 (只要不讓 activeCount < need 即可)
 				if !assigned && remaining[emp.ID] > 0 {
 					for _, dn := range dayNeeds {
 						if schedule[dn.day][emp.ID] != "" {
 							continue
 						}
-						offCount := 0
-						for _, otherEmp := range employees {
-							if schedule[dn.day][otherEmp.ID] == "off" || schedule[dn.day][otherEmp.ID] == "pre_off" {
-								offCount++
-							}
-						}
-						activeCount := len(employees) - (offCount + 1)
+						activeCount := len(employees) - (dn.offCount + 1)
 						if activeCount < dn.need {
 							continue
 						}
@@ -613,40 +682,184 @@ func runMonthlySchedule(
 				}
 			}
 			if !anyAssigned {
-				break // 所有人都分配完畢或無法再分配
+				break
 			}
 		}
 		dayOffset += segmentDays
 	}
 
-	// ─── 步驟 2：排 J (8-8 主力) — 含 R7 做 6 休 1 ⭐ ───
-	log.Println("[Monthly] 步驟 2: 排 J (含 R7)")
+
+	// ─── 步驟 2：排 J (8-8 主力) — 智慧排班 ⭐ ───
+	// J 的 day88 班用來舒緩小夜大夜人力壓力，因此 J 的休假日應避開
+	// 其他員工集中休假的日子。
+	log.Println("[Monthly] 步驟 2: 排 J (智慧排班)")
 	for _, emp := range employees {
 		if !emp.IsDay88Primary {
 			continue
 		}
-		// 計算前月連續工作天數（跨月邊界）
-		streak := 0
-		if prevDaySchedule != nil {
-			prev := prevDaySchedule[emp.ID]
-			if prev != "" && prev != "off" && prev != "pre_off" {
-				streak = 1 // 至少前一天有上班，保守起見算 1
-			}
-		}
+
+		// 0) 先將已有預假/off 的天標記出來
+		preOffDays := make(map[int]bool)
 		for d := 0; d < totalDays; d++ {
 			if schedule[d][emp.ID] == "off" || schedule[d][emp.ID] == "pre_off" {
-				streak = 0
-				continue
+				preOffDays[d] = true
 			}
-			if streak >= 6 {
-				// R7: 做 6 休 1 — J 的休假直接是 off
+		}
+
+		// 1) 計算 J 的休假配額
+		// 根據 R6（做六休一），totalDays 天至少需要 totalDays/7 天休假
+		minOffNeeded := totalDays / 7
+		// 已有的預假天數
+		existingOff := len(preOffDays)
+		offToPlace := minOffNeeded - existingOff
+		if offToPlace < 0 {
+			offToPlace = 0
+		}
+
+		// 2) 計算每天的「人力壓力分數」
+		// 壓力分數 = 該天已休假人數（包含預假與智慧假期分配的結果）
+		type dayPressure struct {
+			day      int
+			pressure int // 壓力分數（越高代表越需要 J 來上班）
+		}
+		candidates := []dayPressure{}
+		for d := 0; d < totalDays; d++ {
+			if preOffDays[d] {
+				continue // 已有預假，跳過
+			}
+			offCount := 0
+			for _, e := range employees {
+				if e.ID == emp.ID {
+					continue
+				}
+				s := schedule[d][e.ID]
+				if s == "off" || s == "pre_off" {
+					offCount++
+				}
+			}
+			candidates = append(candidates, dayPressure{day: d, pressure: offCount})
+		}
+
+		// 3) 按壓力分數從低到高排序（壓力最低的日子優先放 J 的休假）
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].pressure < candidates[j].pressure
+		})
+
+		// 4) 貪婪放置 J 的休假日
+		jOffDays := make(map[int]bool)
+		for k, v := range preOffDays {
+			jOffDays[k] = v // 繼承預假
+		}
+
+		// 輔助函式：檢查在 day 放休假後，是否有任何連續工作段超過 6 天
+		wouldViolateR6 := func(offDays map[int]bool, skipDay int) bool {
+			streak := 0
+			// 加入跨月邊界
+			if prevDaySchedule != nil {
+				prev := prevDaySchedule[emp.ID]
+				if prev != "" && prev != "off" && prev != "pre_off" {
+					streak = 1 // 上個月最後一天有上班
+				}
+			}
+			for d := 0; d < totalDays; d++ {
+				if offDays[d] || d == skipDay {
+					streak = 0
+				} else {
+					streak++
+					if streak > 6 {
+						return true
+					}
+				}
+			}
+			return false
+		}
+
+		placed := 0
+		for _, c := range candidates {
+			if placed >= offToPlace {
+				break
+			}
+			// 試放休假
+			testOff := make(map[int]bool)
+			for k, v := range jOffDays {
+				testOff[k] = v
+			}
+			testOff[c.day] = true
+
+			// 檢查放了之後，剩下的工作段是否都 ≤ 6
+			// (反向思考：移除這個休假日，看看不放它是否會造成 R6 違規)
+			// 我們需要確認放了這天假之後，整體佈局仍然合理
+			// => 先放進去，然後驗證整體不會有 > 6 的連班
+			violates := false
+			streak := 0
+			if prevDaySchedule != nil {
+				prev := prevDaySchedule[emp.ID]
+				if prev != "" && prev != "off" && prev != "pre_off" {
+					streak = 1
+				}
+			}
+			for d := 0; d < totalDays; d++ {
+				if testOff[d] {
+					streak = 0
+				} else {
+					streak++
+					if streak > 6 {
+						violates = true
+						break
+					}
+				}
+			}
+			if violates {
+				continue // 放這天假會導致其他地方連班過長，跳過
+			}
+
+			jOffDays[c.day] = true
+			placed++
+		}
+
+		// 5) 最終 R6 保護：確認沒有連續工作超過 6 天的區段
+		// 如果仍有違規（配額用光但仍有長連班），強制在連班第 7 天插入 off
+		for {
+			if !wouldViolateR6(jOffDays, -1) {
+				break
+			}
+			// 找到第一個違規的位置
+			streak := 0
+			if prevDaySchedule != nil {
+				prev := prevDaySchedule[emp.ID]
+				if prev != "" && prev != "off" && prev != "pre_off" {
+					streak = 1
+				}
+			}
+			fixed := false
+			for d := 0; d < totalDays; d++ {
+				if jOffDays[d] {
+					streak = 0
+				} else {
+					streak++
+					if streak > 6 {
+						jOffDays[d] = true // 強制在第 7 天放假
+						fixed = true
+						break
+					}
+				}
+			}
+			if !fixed {
+				break
+			}
+		}
+
+		// 6) 寫入排班結果
+		for d := 0; d < totalDays; d++ {
+			if schedule[d][emp.ID] == "pre_off" {
+				continue // 預假不覆蓋
+			}
+			if jOffDays[d] {
 				schedule[d][emp.ID] = "off"
-				streak = 0
-				continue
+			} else {
+				schedule[d][emp.ID] = "day88"
+				shiftCount[emp.ID]["day88"]++
 			}
-			schedule[d][emp.ID] = "day88"
-			shiftCount[emp.ID]["day88"]++
-			streak++
 		}
 	}
 
@@ -832,7 +1045,11 @@ func runMonthlySchedule(
 	log.Println("[Monthly] 步驟 5: C7 強制 off 掃描")
 	for _, emp := range employees {
 		// J 也適用 C7（做 6 休 1）
+		// 計算跨月邊界的連續工作天數，避免忽略上月末尾的連班
 		streak := 0
+		if prevDaySchedule != nil {
+			streak = getBackwardStreakV1(emp.ID, schedule, 0, prevDaySchedule)
+		}
 		for d := 0; d < totalDays; d++ {
 			s := schedule[d][emp.ID]
 			if s != "" && s != "off" && s != "pre_off" {
@@ -1046,6 +1263,56 @@ func runMonthlySchedule(
 	return result, warnings
 }
 
+// getBackwardStreakV1 計算某人從某天開始回推的連續上班天數 (含跨月)
+func getBackwardStreakV1(
+	empID uint,
+	schedule map[int]map[uint]string,
+	day int,
+	externalPrevDayShift map[uint]string,
+) int {
+	streak := 0
+	for d := day - 1; d >= 0; d-- {
+		s := schedule[d][empID]
+		if s != "" && s != "off" && s != "pre_off" {
+			streak++
+		} else {
+			return streak
+		}
+	}
+	// 到了月初，繼續往上個月回推
+	if externalPrevDayShift != nil {
+		// 這裡我們只有前一天的資料，暫時無法得知前天，所以最多再加 1
+		// 註：這是一個核心限制，除非 API 提供上個月末的完整連班天數
+		prev := externalPrevDayShift[empID]
+		if prev != "" && prev != "off" && prev != "pre_off" {
+			streak++
+		}
+	}
+	return streak
+}
+
+// translateShiftV1 將英文班別名稱轉換為中文 (用於警示訊息)
+func translateShiftV1(st string) string {
+	switch st {
+	case "day":
+		return "白班"
+	case "day88":
+		return "8-8白班"
+	case "evening":
+		return "小夜班"
+	case "night":
+		return "大夜班"
+	case "night88":
+		return "8-8大夜"
+	case "off":
+		return "休假"
+	case "pre_off":
+		return "預假"
+	default:
+		return st
+	}
+}
+
 // calculateWarnings 獨立出人力不足的檢查邏輯
 func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Employee, reqMap map[requirementKey]models.StaffingRequirement, schedule map[int]map[uint]string, prevDaySchedule map[uint]string) []string {
 	var warnings []string
@@ -1064,8 +1331,8 @@ func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Emp
 					prev = prevDaySchedule[emp.ID]
 				}
 				if isNightShift(prev) {
-					warnings = append(warnings, fmt.Sprintf("%d/%02d/%02d 違反排班約束: %s 班接續前日夜班 (%s)",
-						date.Year(), date.Month(), date.Day(), shift, emp.Name))
+					warnings = append(warnings, fmt.Sprintf("%d/%02d/%02d 違反排班約束: %s 接續前日夜班 (%s)",
+						date.Year(), date.Month(), date.Day(), translateShiftV1(shift), emp.Name))
 				}
 			}
 		}
@@ -1115,8 +1382,8 @@ func calculateWarnings(firstDay time.Time, totalDays int, employees []models.Emp
 			}
 
 			if current < minNeeded {
-				warn := fmt.Sprintf("%d/%02d/%02d %s班人力不足: 需求 %d 人, 實際 %d 人",
-					date.Year(), date.Month(), date.Day(), st, minNeeded, current)
+				warn := fmt.Sprintf("%d/%02d/%02d %s人力不足: 需求 %d 人, 實際 %d 人",
+					date.Year(), date.Month(), date.Day(), translateShiftV1(st), minNeeded, current)
 				warnings = append(warnings, warn)
 			}
 		}
@@ -1187,21 +1454,6 @@ func generateLeaveSummaries(year int, month int) []gin.H {
 			}
 
 			isEndingThisMonth := !cycleStartDate.AddDate(0, 0, (b.CycleIndex*28)-1).After(lastDay)
-			var currentMonthQuota int
-			if balance.MonthQuota >= 0 {
-				currentMonthQuota = balance.MonthQuota
-			} else if isEndingThisMonth {
-				currentMonthQuota = balance.TotalLeave - balance.UsedLeave
-				if currentMonthQuota < 0 {
-					currentMonthQuota = 0
-				}
-			} else {
-				ratio := float64(b.DaysInMonth) / 28.0
-				currentMonthQuota = int(math.Round(float64(balance.TotalLeave) * ratio))
-				if currentMonthQuota > b.DaysInMonth {
-					currentMonthQuota = b.DaysInMonth
-				}
-			}
 
 			// 動態計算「循環累計已用」(只計算該循環中，查詢月份「之前」的排休天數)
 			var usedBeforeThisMonth int64
@@ -1210,16 +1462,36 @@ func generateLeaveSummaries(year int, month int) []gin.H {
 				Count(&usedBeforeThisMonth)
 
 			// 加上外部額外紀錄的已用天數 (若有)
-			actualUsedLeave := int(usedBeforeThisMonth) + balance.OfflineUsed
+			actualUsedBefore := int(usedBeforeThisMonth) + balance.OfflineUsed
+
+			var currentMonthQuota int
+			if balance.MonthQuota >= 0 {
+				currentMonthQuota = balance.MonthQuota
+			} else if isEndingThisMonth {
+				// 循環在本月結束：應休 = 總假 - 本月之前已排
+				currentMonthQuota = balance.TotalLeave - actualUsedBefore
+				if currentMonthQuota < 0 {
+					currentMonthQuota = 0
+				}
+			} else {
+				// 循環跨月：採比例分配
+				ratio := float64(b.DaysInMonth) / 28.0
+				currentMonthQuota = int(math.Round(float64(balance.TotalLeave) * ratio))
+				if currentMonthQuota > b.DaysInMonth {
+					currentMonthQuota = b.DaysInMonth
+				}
+			}
 
 			summaries = append(summaries, gin.H{
 				"employee_id":         emp.ID,
 				"employee_name":       emp.Name,
 				"cycle_index":         b.CycleIndex,
 				"total_leave":         balance.TotalLeave,
-				"used_leave":          actualUsedLeave,
-				"remaining":           balance.TotalLeave - actualUsedLeave,
+				"used_leave":          actualUsedBefore, // 統計表顯示「本月前已用」
+				"remaining":           balance.TotalLeave - actualUsedBefore,
 				"current_month_quota": currentMonthQuota,
+				"is_ending":           isEndingThisMonth, // 傳給前端標籤區分
+				"month_quota_manually_set": balance.MonthQuota >= 0, // 是否由使用者手動在 Modal 指定
 			})
 		}
 	}
