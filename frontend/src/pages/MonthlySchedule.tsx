@@ -11,7 +11,7 @@ import {
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import {
-  getMonthlySchedule, generateMonthlySchedule, generateMonthlyScheduleV2, updateMonthlySlot,
+  getMonthlySchedule, generateMonthlySchedule, updateMonthlySlot,
   getMonthlyLeaveSummary, getCycleBoundaries, getEmployees,
   getMonthlyPreLeaves, createMonthlyPreLeave, deleteMonthlyPreLeave,
   listMonthlyVersions, saveMonthlyVersion, restoreMonthlyVersion, deleteMonthlyVersion,
@@ -40,7 +40,6 @@ export default function MonthlySchedule() {
   // 初始假期設定彈窗
   const [initModalOpen, setInitModalOpen] = useState(false);
   const [initLeaveValues, setInitLeaveValues] = useState<Record<string, number>>({});
-  const [isV2Mode, setIsV2Mode] = useState(false);
 
   // 版本管理
   const [versionModalOpen, setVersionModalOpen] = useState(false);
@@ -99,8 +98,7 @@ export default function MonthlySchedule() {
   useEffect(() => { loadSchedule(); }, [loadSchedule]);
 
   // 產出班表
-  const handleGenerateClick = (v2: boolean = false) => {
-    setIsV2Mode(v2 === true);
+  const handleGenerateClick = () => {
     // 每次點擊都跳出確認窗，但先載入目前的餘額
     const defaults: Record<string, number> = {};
     for (const b of boundaries) {
@@ -122,13 +120,11 @@ export default function MonthlySchedule() {
   };
 
   const doGenerate = async (
-    cycleBalances: { cycle_index: number; employee_id: number; total_leave: number }[],
-    v2: boolean = false
+    cycleBalances: { cycle_index: number; employee_id: number; total_leave: number }[]
   ) => {
     setGenerating(true);
     try {
-      const apiCall = v2 ? generateMonthlyScheduleV2 : generateMonthlySchedule;
-      const res = await apiCall(year, month, cycleBalances);
+      const res = await generateMonthlySchedule(year, month, cycleBalances);
       setSlots(res.data.slots);
       setWarnings(res.data.warnings || []);
       setHasSchedule(true);
@@ -155,7 +151,7 @@ export default function MonthlySchedule() {
       balances.push({ cycle_index: ci, employee_id: eid, total_leave: initLeaveValues[key] });
     }
     setInitModalOpen(false);
-    await doGenerate(balances, isV2Mode);
+    await doGenerate(balances);
   };
 
   // 載入版本清單
@@ -293,10 +289,10 @@ export default function MonthlySchedule() {
   // 班別下拉選單
   const shiftMenuItems: MenuProps['items'] = [
     { key: 'day', label: '☀️ 白班' },
-    { key: 'day88', label: '🌅 8-8 白班' },
-    { key: 'evening', label: '🌙 小夜班' },
-    { key: 'night', label: '🌑 大夜班' },
-    { key: 'night88', label: '🌑 8-8 大夜' },
+    { key: 'day88', label: '🌅 白8' },
+    { key: 'evening', label: '🌙 小' },
+    { key: 'night', label: '🌑 大' },
+    { key: 'night88', label: '🌑 大8' },
     { key: 'off', label: '🟢 休假' },
   ];
 
@@ -317,43 +313,19 @@ export default function MonthlySchedule() {
       const isWeekend = weekday === 0 || weekday === 6;
       const isBoundary = boundaryDates.has(day);
 
-      // 計算當日人力
-      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const daySlots = (slots || []).filter(s => s.date.startsWith(dateStr));
-      const counts: Record<string, number> = { day: 0, evening: 0, night: 0 };
-      let hasDay88 = false;
-      daySlots.forEach(s => {
-        if (s.shift_type === 'day' || s.shift_type === 'day88') counts.day++;
-        if (s.shift_type === 'evening') counts.evening++;
-        if (s.shift_type === 'night' || s.shift_type === 'night88') counts.night++;
-        if (s.shift_type === 'day88') hasDay88 = true;
-      });
-
-      const dailyReqs = staffingRequirements.filter(r => r.weekday === weekday);
-
-      // 輔助函式：取得指定班別的需求量
-      const getRequirementValue = (st: string) => {
-        const r = dailyReqs.find(rr => rr.shift_type === st);
-        return r ? (hasDay88 ? r.min_count_with_day88 : r.min_count) : 0;
-      };
-
-      const shortageAnywhere =
-        counts.day < getRequirementValue('day') ||
-        counts.evening < getRequirementValue('evening') ||
-        counts.night < getRequirementValue('night');
-
       return {
         title: (
           <div style={{ textAlign: 'center' as const, lineHeight: 1.2 }}>
-            <div style={{ fontSize: 12, color: shortageAnywhere ? '#ff4d4f' : (isWeekend ? '#ff4d4f' : '#666') }}>
-              {weekdayNames[weekday]}
-            </div>
             <div style={{
+              fontSize: 14,
               fontWeight: 600,
-              color: shortageAnywhere ? '#ff4d4f' : 'inherit',
-              textDecoration: shortageAnywhere ? 'underline' : 'none'
+              color: 'inherit',
+              textDecoration: 'none'
             }}>
               {day}
+            </div>
+            <div style={{ fontSize: 12, color: isWeekend ? '#ff4d4f' : '#858585' }}>
+              {weekdayNames[weekday]}
             </div>
           </div>
         ),
@@ -509,7 +481,7 @@ export default function MonthlySchedule() {
                 key: 'set_quota',
                 label: '設定配額並產出',
                 icon: <EditOutlined />,
-                onClick: () => handleGenerateClick(false)
+                onClick: () => handleGenerateClick()
               }
             ]
           }}
@@ -641,7 +613,7 @@ export default function MonthlySchedule() {
                     <Table.Summary.Row key={shiftType} style={{ background: '#fafafa' }}>
                       <Table.Summary.Cell index={0} align="right">
                         <div style={{ fontSize: 12, fontWeight: 'bold' }}>
-                          {emoji} {shiftType === 'day' ? '白班' : shiftType === 'evening' ? '小夜' : '大夜'}
+                          {emoji} {shiftType === 'day' ? '白' : shiftType === 'evening' ? '小' : '大'}
                         </div>
                         <div style={{ fontSize: 10, color: '#8c8c8c' }}>(應/實)</div>
                       </Table.Summary.Cell>
@@ -712,7 +684,7 @@ export default function MonthlySchedule() {
           <Card style={{ textAlign: 'center', padding: 40 }}>
             <EditOutlined style={{ fontSize: 48, color: '#bfbfbf' }} />
             <p style={{ color: '#999', marginTop: 16 }}>尚未建立 {year}/{month} 月度班表</p>
-            <Button type="primary" onClick={() => handleGenerateClick(false)}>
+            <Button type="primary" onClick={() => handleGenerateClick()}>
               立即產出
             </Button>
           </Card>

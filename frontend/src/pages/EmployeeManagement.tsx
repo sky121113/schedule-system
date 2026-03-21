@@ -36,7 +36,7 @@ const EmployeeManagement = () => {
       key: 'type',
       width: 120,
       render: (_: unknown, record: Employee) =>
-        record.is_day88_primary ? <Tag color="orange">8-8 主力</Tag> : <Tag>一般</Tag>,
+        record.is_day88_primary ? <Tag color="orange">白8 主力</Tag> : <Tag>一般</Tag>,
     },
     {
       title: '狀態',
@@ -202,7 +202,7 @@ const EmployeeManagement = () => {
           <Form.Item name="email" label="Email" rules={[{ required: true, type: 'email' }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="is_day88_primary" label="8-8 主力" valuePropName="checked">
+          <Form.Item name="is_day88_primary" label="白8 主力" valuePropName="checked">
             <Select options={[{ value: true, label: '是' }, { value: false, label: '否' }]} />
           </Form.Item>
           <Form.Item name="status" label="狀態">
@@ -269,10 +269,10 @@ const EmployeeManagement = () => {
                 placeholder="班別"
                 style={{ width: 120 }}
                 options={[
-                  { value: 'day', label: '白班' },
-                  { value: 'evening', label: '小夜' },
-                  { value: 'night', label: '大夜' },
-                  { value: 'day88', label: '8-8' },
+                  { value: 'day', label: '白' },
+                  { value: 'evening', label: '小' },
+                  { value: 'night', label: '大' },
+                  { value: 'day88', label: '白8' },
                 ]}
               />
             </Form.Item>

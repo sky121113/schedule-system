@@ -97,7 +97,7 @@ const StaffingSettings = () => {
       {
         title: () => (
           <span>
-            <Tag color={SHIFT_CONFIG[st].color}>{SHIFT_CONFIG[st].label}</Tag> 有8-8
+            <Tag color={SHIFT_CONFIG[st].color}>{SHIFT_CONFIG[st].label}</Tag> 含8系列
           </span>
         ),
         key: `${st}-min88`,
